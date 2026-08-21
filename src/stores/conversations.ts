@@ -2,7 +2,7 @@ import { create } from 'zustand'
 import { api, ws, type ApiConversation } from '@/api/client'
 import type { Conversation } from '@/types'
 import { useApp } from '@/stores/app'
-import { useAuth } from '@/stores/auth'
+import { commitIfContextCurrent, useAuth } from '@/stores/auth'
 import { useMessages } from '@/stores/messages'
 import { useParticipants } from '@/stores/participants'
 
@@ -185,20 +185,22 @@ export const useConversations = create<ConversationsState>((set) => ({
     // previous tenant's conversations during the loading window.
     set({ list: [], loaded: false })
     try {
-      const list = await api.getConversations()
-      const conversations = list.map(fromApi)
-      set({ list: conversations, loaded: true })
-      refreshActiveMessagesIfSidebarMoved(conversations)
+      await commitIfContextCurrent(() => api.getConversations(), (list) => {
+        const conversations = list.map(fromApi)
+        set({ list: conversations, loaded: true })
+        refreshActiveMessagesIfSidebarMoved(conversations)
+      })
     } catch (err) {
       console.warn('[conversations] load failed', err)
     }
   },
   async reload() {
     try {
-      const list = await api.getConversations()
-      const conversations = list.map(fromApi)
-      set({ list: conversations })
-      refreshActiveMessagesIfSidebarMoved(conversations)
+      await commitIfContextCurrent(() => api.getConversations(), (list) => {
+        const conversations = list.map(fromApi)
+        set({ list: conversations })
+        refreshActiveMessagesIfSidebarMoved(conversations)
+      })
     } catch (err) {
       console.warn('[conversations] reload failed', err)
     }

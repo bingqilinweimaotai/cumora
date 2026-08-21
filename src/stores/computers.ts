@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { api, ws, type ApiComputer } from '@/api/client'
 import type { Computer, ComputerStatus } from '@/types'
+import { commitIfContextCurrent } from '@/stores/auth'
 
 interface ComputersState {
   byId: Record<string, Computer>
@@ -31,10 +32,11 @@ function fromApi(c: ApiComputer): Computer {
 
 async function fetchInto(set: (partial: Partial<ComputersState>) => void): Promise<void> {
   try {
-    const list = await api.getComputers()
-    const byId: Record<string, Computer> = {}
-    for (const c of list) byId[c.id] = fromApi(c)
-    set({ byId, loaded: true })
+    await commitIfContextCurrent(() => api.getComputers(), (list) => {
+      const byId: Record<string, Computer> = {}
+      for (const c of list) byId[c.id] = fromApi(c)
+      set({ byId, loaded: true })
+    })
   } catch (err) {
     console.warn('[computers] fetch failed', err)
   }

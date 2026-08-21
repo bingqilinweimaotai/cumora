@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import { api, ws, type ApiParticipant } from '@/api/client'
 import type { Participant, Status } from '@/types'
 import { invalidateAvatar, clearAvatarCache } from '@/lib/avatarCache'
+import { commitIfContextCurrent } from '@/stores/auth'
 
 interface ParticipantsState {
   byId: Record<string, Participant>
@@ -40,10 +41,11 @@ function normalizeStatus(status: Status, updatedAt?: string): Status {
  *  difference is whether they pre-clear state. */
 async function fetchInto(set: (partial: Partial<ParticipantsState>) => void): Promise<void> {
   try {
-    const list = await api.getParticipants()
-    const byId: Record<string, Participant> = {}
-    for (const p of list) byId[p.id] = fromApi(p)
-    set({ byId, loaded: true })
+    await commitIfContextCurrent(() => api.getParticipants(), (list) => {
+      const byId: Record<string, Participant> = {}
+      for (const p of list) byId[p.id] = fromApi(p)
+      set({ byId, loaded: true })
+    })
   } catch (err) {
     console.warn('[participants] fetch failed', err)
   }

@@ -11,6 +11,7 @@
  */
 import { create } from 'zustand'
 import { api, ws, type ApiWhisper, type ApiWhisperMessage } from '@/api/client'
+import { commitIfContextCurrent } from '@/stores/auth'
 
 export interface WhispersState {
   list: ApiWhisper[]
@@ -41,8 +42,10 @@ export const useWhispers = create<WhispersState>((set) => ({
     // tenant's peek list + per-pair message cache before fetching fresh.
     set({ list: [], byId: {}, streaming: {}, loaded: false })
     try {
-      const list = await api.getWhispers()
-      set({ list, loaded: true })
+      await commitIfContextCurrent(
+        () => api.getWhispers(),
+        (list) => set({ list, loaded: true }),
+      )
     } catch (err) {
       console.warn('[whispers] loadList failed', err)
     }
@@ -53,8 +56,10 @@ export const useWhispers = create<WhispersState>((set) => ({
     // handlers call this so the per-conversation `byId` cache doesn't
     // get wiped (which would flash the open thread empty).
     try {
-      const list = await api.getWhispers()
-      set({ list, loaded: true })
+      await commitIfContextCurrent(
+        () => api.getWhispers(),
+        (list) => set({ list, loaded: true }),
+      )
     } catch (err) {
       console.warn('[whispers] refreshList failed', err)
     }
@@ -62,8 +67,10 @@ export const useWhispers = create<WhispersState>((set) => ({
 
   async loadMessages(id) {
     try {
-      const msgs = await api.getWhisperMessages(id)
-      set((s) => ({ byId: { ...s.byId, [id]: msgs } }))
+      await commitIfContextCurrent(
+        () => api.getWhisperMessages(id),
+        (msgs) => set((s) => ({ byId: { ...s.byId, [id]: msgs } })),
+      )
     } catch (err) {
       console.warn('[whispers] loadMessages failed', err)
     }
