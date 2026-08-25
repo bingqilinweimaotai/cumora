@@ -10,7 +10,6 @@ import { Checkbox } from '@/components/Checkbox'
 import { LanguagePicker } from '@/components/LanguagePicker'
 import { useT, type MessageKey } from '@/lib/i18n'
 import { cn } from '@/lib/utils'
-import { isWindows } from '@/lib/runtime'
 import { api, getPairingServerOrigin, getServerOrigin, type ApiProject, type ApiQuotaSnapshot, type ApiQuotaWindow } from '@/api/client'
 
 // The tab's identity is its `key`; the label is a message key resolved at
@@ -758,8 +757,7 @@ function ComputersTab() {
   // explicitly, or the daemon auto-detects and engines[0] silently wins.
   const [engine, setEngine] = useState<'claude' | 'codex' | 'grok' | 'cursor'>('claude')
   // Default on: install the always-on service (auto-start/restart/update).
-  // --install-service is macOS/Linux only (daemon throws on Windows) → off + hidden there.
-  const [asService, setAsService] = useState(!isWindows)
+  const [asService, setAsService] = useState(true)
   // Per-computer re-pair (reconnect) command, keyed by computer id.
   const [repairFor, setRepairFor] = useState<string | null>(null)
   const [repairCode, setRepairCode] = useState<string | null>(null)
@@ -915,19 +913,12 @@ function ComputersTab() {
               </div>
               <span className="text-[11px] text-ink-400">{t('me.engineDefaultHint')}</span>
             </div>
-            {isWindows ? (
-              <div className="mb-2.5 text-[12px] text-ink-600">
-                {t('me.keepTerminalOpen')}
-                <span className="text-ink-400"> — {t('me.bgServiceUnsupported')}</span>
-              </div>
-            ) : (
-              <label className="flex items-start gap-2 mb-2.5 cursor-pointer select-none">
-                <input type="checkbox" checked={asService} onChange={(e) => setAsService(e.target.checked)} className="mt-[3px]" />
-                <span className="text-[12px] text-ink-600">
-                  {t('me.keepInBackground')} <span className="text-ink-400">— {t('me.keepInBackgroundDetail')}</span>
-                </span>
-              </label>
-            )}
+            <label className="flex items-start gap-2 mb-2.5 cursor-pointer select-none">
+              <input type="checkbox" checked={asService} onChange={(e) => setAsService(e.target.checked)} className="mt-[3px]" />
+              <span className="text-[12px] text-ink-600">
+                {t('me.keepInBackground')} <span className="text-ink-400">— {t('me.keepInBackgroundDetail')}</span>
+              </span>
+            </label>
             <pre className="bg-ink-900 text-cloud rounded-[10px] p-3 text-[12px] overflow-x-auto whitespace-pre-wrap break-all font-mono select-all">{pairCommand}</pre>
             <div className="flex gap-2 mt-3">
               <button onClick={copyCommand} aria-live="polite"

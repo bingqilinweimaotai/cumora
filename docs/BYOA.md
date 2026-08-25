@@ -388,9 +388,10 @@ npx cumora@latest agent computer --pair <code> [--server <url>]
   separate copy. The repo's root `package.json` stays `private`; only
   this thin package is published.
 - `--install-service` installs the daemon as a supervised service
-  (launchd `io.cumora.daemon` on macOS, `systemd --user` on Linux) so it
-  survives reboots and — on macOS — runs in the GUI domain where the
-  engine's keychain-backed login actually works.
+  (launchd `io.cumora.daemon` on macOS, `systemd --user` on Linux, a per-user
+  Task Scheduler watchdog on Windows) so it restarts at user login (including
+  after a reboot) and — on macOS — runs in the GUI domain where the engine's
+  keychain-backed login actually works.
 - `--doctor` probes the big/small models and the wake path end-to-end.
 - In-repo dev uses `./bin/cumora agent computer …` (tsx) — the same
   code, unbundled.

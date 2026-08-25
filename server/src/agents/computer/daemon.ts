@@ -293,6 +293,11 @@ const SERVICE_LABEL = 'io.cumora.daemon'
  *  to apply an update. A manually-run daemon just logs the available version. */
 const SUPERVISED = process.env.CUMORA_SUPERVISED === '1'
 
+export function windowsTaskName(home = homedir()): string {
+  const userKey = createHash('sha256').update(home.toLowerCase()).digest('hex').slice(0, 12)
+  return `Cumora BYOA Daemon (${userKey})`
+}
+
 /** semver-ish a > b for plain MAJOR.MINOR.PATCH (ignores pre-release tags). */
 function versionGt(a: string, b: string): boolean {
   const pa = a.split('.').map((n) => parseInt(n, 10) || 0)
@@ -2406,9 +2411,13 @@ async function doRun(serverOverride?: string): Promise<void> {
   // Record what THIS process is running, keyed by pid, so `--status` can report
   // the version of the live service instance reliably (cross-checked against the
   // running pid — survives log rotation, no log-scraping).
+  const windowsShutdownRequest = process.platform === 'win32'
+    ? windowsShutdownRequestPath(process.pid)
+    : null
+  if (windowsShutdownRequest) await rm(windowsShutdownRequest, { force: true }).catch(() => {})
   await writeRunningState()
   if (!SUPERVISED) {
-    console.log(`[computer] 💡 tip: run \`npx cumora@latest agent computer --install-service\` to keep this running in the background — auto-start on boot, auto-restart on crash, and auto-update. (This terminal must stay open otherwise.)`)
+    console.log(`[computer] 💡 tip: run \`npx cumora@latest agent computer --install-service\` to keep this running in the background — auto-start when you sign in, auto-restart on crash, and auto-update. (This terminal must stay open otherwise.)`)
   }
 
   const runners = new Map<string, AgentRunner>()
@@ -2478,6 +2487,7 @@ async function doRun(serverOverride?: string): Promise<void> {
 
   let upd: ReturnType<typeof setInterval> | undefined
   let idleWatch: ReturnType<typeof setInterval> | undefined
+  let controlWatch: ReturnType<typeof setInterval> | undefined
   let shuttingDown = false
   const anyBusy = (): boolean => [...runners.values()].some((r) => r.isBusy)
 
@@ -2491,6 +2501,8 @@ async function doRun(serverOverride?: string): Promise<void> {
     clearInterval(poll); clearInterval(beat); clearInterval(logrot)
     if (upd) clearInterval(upd)
     if (idleWatch) clearInterval(idleWatch)
+    if (controlWatch) clearInterval(controlWatch)
+    if (windowsShutdownRequest) await rm(windowsShutdownRequest, { force: true }).catch(() => {})
     for (const runner of runners.values()) runner.beginStop() // no new turns; leave in-flight running
     const deadline = Date.now() + SHUTDOWN_GRACE_MS
     if (anyBusy()) console.log(`[computer] ${why}: waiting up to ${Math.round(SHUTDOWN_GRACE_MS / 1000)}s for in-flight turn(s) to finish…`)
@@ -2501,6 +2513,12 @@ async function doRun(serverOverride?: string): Promise<void> {
   }
   process.on('SIGINT', () => { void shutdown('SIGINT') })
   process.on('SIGTERM', () => { void shutdown('SIGTERM') })
+  if (windowsShutdownRequest) {
+    controlWatch = setInterval(() => {
+      if (existsSync(windowsShutdownRequest)) void shutdown('service control')
+    }, 250)
+    controlWatch.unref?.()
+  }
 
   // Self-update: compare to npm's latest periodically. When supervised
   // (--install-service), a clean exit relaunches the service on cumora@latest =
@@ -2549,15 +2567,95 @@ async function checkForUpdate(onSupervisedUpdate: () => void): Promise<void> {
 
 /** Absolute path to npx next to the node that's running us, so the supervisor
  *  doesn't depend on its (minimal) PATH resolving `npx`. Falls back to PATH. */
-function resolveNpx(): string {
-  const sibling = join(dirname(process.execPath), 'npx')
-  return existsSync(sibling) ? sibling : 'npx'
+export function resolveNpx(
+  platform: NodeJS.Platform = process.platform,
+  execPath = process.execPath,
+): string {
+  const executable = platform === 'win32' ? 'npx.cmd' : 'npx'
+  const sibling = join(dirname(execPath), executable)
+  return existsSync(sibling) ? sibling : executable
+}
+
+function windowsSupervisorPath(): string {
+  return join(CONFIG_DIR, 'daemon-supervisor.ps1')
+}
+
+function windowsSupervisorDisabledPath(): string {
+  return join(CONFIG_DIR, 'daemon-supervisor.disabled')
+}
+
+function windowsShutdownRequestPath(pid: number): string {
+  return join(CONFIG_DIR, `shutdown-${pid}.request`)
+}
+
+function quotePowerShell(value: string): string {
+  return `'${value.replaceAll("'", "''")}'`
+}
+
+/** The scheduled task starts this watchdog at login. It deliberately restarts
+ *  after every daemon exit, including the clean exit used to apply an update. */
+export function renderWindowsSupervisor(
+  npx: string,
+  serverUrl: string,
+  logPath: string,
+  disabledPath = windowsSupervisorDisabledPath(),
+  path = process.env.PATH ?? '',
+): string {
+  return [
+    "$ErrorActionPreference = 'Continue'",
+    "$env:CUMORA_SUPERVISED = '1'",
+    `$env:PATH = ${quotePowerShell(path)}`,
+    '$utf8 = New-Object System.Text.UTF8Encoding($false)',
+    `while (-not (Test-Path -LiteralPath ${quotePowerShell(disabledPath)})) {`,
+    `  & ${quotePowerShell(npx)} -y cumora@latest agent computer --server ${quotePowerShell(serverUrl)} 2>&1 | ForEach-Object {`,
+    `    [System.IO.File]::AppendAllText(${quotePowerShell(logPath)}, ([string]$_ + [Environment]::NewLine), $utf8)`,
+    '  }',
+    '  Start-Sleep -Seconds 5',
+    '}',
+    '',
+  ].join('\r\n')
+}
+
+export function windowsScheduledTaskCommand(scriptPath: string): string {
+  return `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "${scriptPath.replaceAll('"', '""')}"`
+}
+
+export function windowsScheduledTaskCreateArgs(
+  scriptPath: string,
+  taskName = windowsTaskName(),
+): string[] {
+  return [
+    '/Create', '/TN', taskName,
+    '/TR', windowsScheduledTaskCommand(scriptPath),
+    '/SC', 'ONLOGON', '/RL', 'LIMITED', '/IT', '/F',
+  ]
+}
+
+export function windowsScheduledTaskSettingsCommand(taskName = windowsTaskName()): string {
+  return `$settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable; Set-ScheduledTask -TaskName ${quotePowerShell(taskName)} -Settings $settings | Out-Null`
+}
+
+export function windowsScheduledTaskQueryCommand(taskName = windowsTaskName()): string {
+  return `try { Get-ScheduledTask -TaskName ${quotePowerShell(taskName)} -ErrorAction Stop | Out-Null; exit 0 } catch { if ($_.FullyQualifiedErrorId -like 'CmdletizationQuery_NotFound_TaskName,*') { exit 3 }; Write-Error $_; exit 1 }`
+}
+
+async function isWindowsTaskInstalled(taskName = windowsTaskName()): Promise<boolean> {
+  try {
+    await execFileP('powershell.exe', [
+      '-NoProfile', '-NonInteractive', '-Command', windowsScheduledTaskQueryCommand(taskName),
+    ])
+    return true
+  } catch (err) {
+    if (String((err as { code?: number | string }).code) === '3') return false
+    throw err
+  }
 }
 
 /** Install a per-user supervisor (LaunchAgent on macOS, systemd --user on
- *  Linux) that runs `npx -y cumora@latest agent computer --server <url>` with
- *  auto-restart + run-at-boot. `@latest` + restart-on-update is what makes the
- *  daemon self-update (see checkForUpdate). Must be paired first. */
+ *  Linux, Task Scheduler on Windows) that runs
+ *  `npx -y cumora@latest agent computer --server <url>` with auto-restart +
+ *  start-at-login. `@latest` + restart-on-update is what makes the daemon
+ *  self-update (see checkForUpdate). Must be paired first. */
 async function installService(serverUrl: string): Promise<void> {
   if (!(await loadConfig())) {
     throw new Error('pair this computer first: cumora agent computer --pair <code>')
@@ -2619,7 +2717,48 @@ WantedBy=default.target
     return
   }
 
-  throw new Error(`--install-service supports macOS and Linux (not ${process.platform})`)
+  if (process.platform === 'win32') {
+    const scriptPath = windowsSupervisorPath()
+    const disabledPath = windowsSupervisorDisabledPath()
+    const taskName = windowsTaskName()
+    const replacing = await isWindowsTaskInstalled(taskName)
+    await writeFile(scriptPath, renderWindowsSupervisor(npx, serverUrl, logPath, disabledPath), 'utf8')
+    try {
+      if (!replacing) {
+        await execFileP('schtasks.exe', windowsScheduledTaskCreateArgs(scriptPath, taskName))
+      }
+      await execFileP('powershell.exe', [
+        '-NoProfile', '-NonInteractive', '-Command', windowsScheduledTaskSettingsCommand(taskName),
+      ])
+    } catch (err) {
+      if (!replacing) {
+        try {
+          await execFileP('schtasks.exe', ['/Delete', '/TN', taskName, '/F'])
+        } catch (rollbackErr) {
+          throw new Error(`scheduled task setup failed and rollback could not delete '${taskName}'; the watchdog script was kept in place (${rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr)})`, { cause: err })
+        }
+        await rm(scriptPath, { force: true }).catch(() => {})
+      }
+      throw err
+    }
+    await writeFile(disabledPath, '', 'utf8')
+    await killRunningDaemons()
+    await stopWindowsWatchdog(taskName)
+    // The old watchdog could have spawned a daemon between the first process
+    // sweep and its own exit. Sweep once more only after it cannot relaunch one.
+    await killRunningDaemons()
+    await rm(disabledPath, { force: true })
+    try {
+      await execFileP('schtasks.exe', ['/Run', '/TN', taskName])
+    } catch (err) {
+      throw new Error(`scheduled task installed but could not be started; retry with --restart (${err instanceof Error ? err.message : String(err)})`)
+    }
+    console.log(`[computer] installed scheduled task '${taskName}' — start-at-login, auto-restart, auto-update. Logs: ${logPath}`)
+    console.log(`[computer] you can now close this terminal; the task is running in the background.`)
+    return
+  }
+
+  throw new Error(`--install-service is not supported on ${process.platform}`)
 }
 
 async function uninstallService(): Promise<void> {
@@ -2637,7 +2776,28 @@ async function uninstallService(): Promise<void> {
     console.log(`[computer] removed systemd --user service 'cumora'`)
     return
   }
-  throw new Error(`--uninstall-service supports macOS and Linux (not ${process.platform})`)
+  if (process.platform === 'win32') {
+    const taskName = windowsTaskName()
+    const disabledPath = windowsSupervisorDisabledPath()
+    await mkdir(CONFIG_DIR, { recursive: true })
+    await writeFile(disabledPath, '', 'utf8')
+    if (await isWindowsTaskInstalled(taskName)) {
+      await execFileP('schtasks.exe', ['/Delete', '/TN', taskName, '/F'])
+    }
+    await killRunningDaemons()
+    await stopWindowsWatchdog(taskName)
+    await killRunningDaemons()
+    if (await isWindowsTaskInstalled(taskName)) {
+      throw new Error(`scheduled task '${taskName}' still exists after deletion`)
+    }
+    await rm(windowsSupervisorPath(), { force: true })
+    // Keep this sentinel on every failed stop path so a surviving watchdog
+    // cannot revive a daemon after the command has reported an error.
+    await rm(disabledPath, { force: true })
+    console.log(`[computer] removed scheduled task '${taskName}'`)
+    return
+  }
+  throw new Error(`--uninstall-service is not supported on ${process.platform}`)
 }
 
 function darwinPlistPath(): string {
@@ -2648,9 +2808,10 @@ function linuxUnitPath(): string {
 }
 
 /** Is the background supervisor already installed on this machine? */
-function isServiceInstalled(): boolean {
+async function isServiceInstalled(): Promise<boolean> {
   if (process.platform === 'darwin') return existsSync(darwinPlistPath())
   if (process.platform === 'linux') return existsSync(linuxUnitPath())
+  if (process.platform === 'win32') return isWindowsTaskInstalled()
   return false
 }
 
@@ -2666,6 +2827,18 @@ async function reloadService(): Promise<void> {
   }
   if (process.platform === 'linux') {
     await execFileP('systemctl', ['--user', 'restart', 'cumora'])
+    return
+  }
+  if (process.platform === 'win32') {
+    const taskName = windowsTaskName()
+    const disabledPath = windowsSupervisorDisabledPath()
+    await mkdir(CONFIG_DIR, { recursive: true })
+    await writeFile(disabledPath, '', 'utf8')
+    await killRunningDaemons()
+    await stopWindowsWatchdog(taskName)
+    await killRunningDaemons()
+    await rm(disabledPath, { force: true })
+    await execFileP('schtasks.exe', ['/Run', '/TN', taskName])
   }
 }
 
@@ -2673,7 +2846,7 @@ async function reloadService(): Promise<void> {
  *  `launchctl kickstart …`. Restarts the installed service (which relaunches on
  *  cumora@latest, so it's also the "apply the update now" button). */
 async function restartService(): Promise<void> {
-  if (!isServiceInstalled()) {
+  if (!(await isServiceInstalled())) {
     console.log('[computer] service not installed — run: npx cumora@latest agent computer --install-service')
     return
   }
@@ -2686,8 +2859,10 @@ async function restartService(): Promise<void> {
     }
   } else if (process.platform === 'linux') {
     await execFileP('systemctl', ['--user', 'restart', 'cumora'])
+  } else if (process.platform === 'win32') {
+    await reloadService()
   } else {
-    throw new Error(`--restart supports macOS and Linux (not ${process.platform})`)
+    throw new Error(`--restart is not supported on ${process.platform}`)
   }
   console.log('[computer] service restarted — it relaunches on cumora@latest (also applies any pending update). Check: npx cumora@latest agent computer --status')
 }
@@ -2716,19 +2891,93 @@ export function isStoppableDaemonCommand(cmd: string): boolean {
   return /agent computer/.test(cmd) && !ONE_SHOT_FLAG_RE.test(cmd)
 }
 
-/** Kill any RUNNING daemon process — the supervised one (after the service is
+async function commandLineForPid(pid: number): Promise<string> {
+  if (process.platform === 'win32') {
+    const command = `(Get-CimInstance Win32_Process -Filter "ProcessId = ${pid}" -ErrorAction SilentlyContinue).CommandLine`
+    return (await execFileP('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command])).stdout.trim()
+  }
+  return (await execFileP('ps', ['-p', String(pid), '-o', 'command='])).stdout.trim()
+}
+
+interface WindowsProcessInfo {
+  ProcessId: number
+  CommandLine: string
+  Name?: string
+}
+
+export function parseWindowsProcessList(output: string): WindowsProcessInfo[] {
+  if (!output.trim()) return []
+  const parsed = JSON.parse(output) as WindowsProcessInfo | WindowsProcessInfo[]
+  return (Array.isArray(parsed) ? parsed : [parsed]).filter((item) =>
+    Number.isInteger(item?.ProcessId) && item.ProcessId > 0 && typeof item.CommandLine === 'string')
+}
+
+async function windowsDaemonProcesses(): Promise<WindowsProcessInfo[]> {
+  const command = [
+    '$OutputEncoding = [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)',
+    `@(Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object { $_.CommandLine -match 'agent\\s+computer' } | Select-Object ProcessId, CommandLine) | ConvertTo-Json -Compress`,
+  ].join('; ')
+  const { stdout } = await execFileP('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command])
+  return parseWindowsProcessList(stdout)
+}
+
+async function windowsSupervisorProcesses(): Promise<WindowsProcessInfo[]> {
+  const command = [
+    '$OutputEncoding = [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)',
+    `@(Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object { ($_.Name -ieq 'powershell.exe' -or $_.Name -ieq 'pwsh.exe') -and $_.CommandLine -match 'daemon-supervisor\\.ps1' } | Select-Object ProcessId, CommandLine, Name) | ConvertTo-Json -Compress`,
+  ].join('; ')
+  const { stdout } = await execFileP('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command])
+  return parseWindowsProcessList(stdout).filter((item) => isWindowsSupervisorProcess(item))
+}
+
+export function isWindowsSupervisorProcess(
+  item: WindowsProcessInfo,
+  scriptPath = windowsSupervisorPath(),
+): boolean {
+  if (!item.Name || !['powershell.exe', 'pwsh.exe'].includes(item.Name.toLowerCase())) return false
+  const match = item.CommandLine.match(/(?:^|\s)-File\s+(?:"([^"]+)"|(\S+))(?:\s|$)/i)
+  const invokedScript = match?.[1] ?? match?.[2]
+  return invokedScript?.toLowerCase() === scriptPath.toLowerCase()
+}
+
+async function stopWindowsWatchdog(taskName: string): Promise<void> {
+  await execFileP('schtasks.exe', ['/End', '/TN', taskName]).catch(() => { /* deleted/already stopped */ })
+  const deadline = Date.now() + 2_000
+  let watchdogs = await windowsSupervisorProcesses()
+  while (watchdogs.length > 0 && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    watchdogs = await windowsSupervisorProcesses()
+  }
+  for (const watchdog of watchdogs) {
+    await execFileP('taskkill.exe', ['/PID', String(watchdog.ProcessId), '/T', '/F']).catch(() => {})
+  }
+  const forceDeadline = Date.now() + 2_000
+  watchdogs = await windowsSupervisorProcesses()
+  while (watchdogs.length > 0 && Date.now() < forceDeadline) {
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    watchdogs = await windowsSupervisorProcesses()
+  }
+  if (watchdogs.length > 0) {
+    throw new Error(`Windows watchdog process(es) still running: ${watchdogs.map((item) => item.ProcessId).join(', ')}`)
+  }
+}
+
+/** Stop any RUNNING daemon process — the supervised one (after the service is
  *  uninstalled), a foreground one, or a stray/orphaned one. Sources: the pid the
- *  daemon records in running.json, plus a `pgrep` sweep for "agent computer". We
+ *  daemon records in running.json, plus an OS process sweep for "agent computer". We
  *  verify each candidate's command line really is a long-running daemon (and is
- *  NOT this --stop command or another one-shot CLI) before killing — SIGTERM,
- *  then SIGKILL anything that ignores it. Best-effort. */
+ *  NOT this --stop command or another one-shot CLI) before stopping it. Windows
+ *  uses a per-PID request file for graceful shutdown, then taskkill /T as the
+ *  bounded fallback so engine descendants cannot be orphaned. */
 async function killRunningDaemons(): Promise<void> {
   const candidates = new Set<number>()
   try {
     const pid = (JSON.parse(await readFile(RUNNING_STATE_PATH, 'utf8')) as { pid?: number }).pid
     if (typeof pid === 'number' && pid > 0) candidates.add(pid)
   } catch { /* no pid file */ }
-  if (process.platform !== 'win32') {
+  if (process.platform === 'win32') {
+    for (const item of await windowsDaemonProcesses()) candidates.add(item.ProcessId)
+  } else {
     try {
       const { stdout } = await execFileP('pgrep', ['-f', 'agent computer'])
       for (const l of stdout.split('\n')) { const p = parseInt(l.trim(), 10); if (p > 0) candidates.add(p) }
@@ -2739,8 +2988,7 @@ async function killRunningDaemons(): Promise<void> {
   const victims: number[] = []
   for (const pid of candidates) {
     try {
-      const { stdout } = await execFileP('ps', ['-p', String(pid), '-o', 'command='])
-      const cmd = stdout.trim()
+      const cmd = await commandLineForPid(pid)
       // A genuine long-running daemon: "agent computer" with NO one-shot flag —
       // so we never kill a sibling one-shot CLI. (Ourselves and our parent are
       // already out of `candidates`.)
@@ -2749,11 +2997,49 @@ async function killRunningDaemons(): Promise<void> {
       }
     } catch { /* gone */ }
   }
-  for (const pid of victims) { try { process.kill(pid, 'SIGTERM') } catch { /* gone */ } }
+  if (process.platform === 'win32') {
+    if (victims.length > 0) await mkdir(CONFIG_DIR, { recursive: true })
+    for (const pid of victims) {
+      await writeFile(windowsShutdownRequestPath(pid), 'stop\n', 'utf8').catch(() => {})
+    }
+    const deadline = Date.now() + SHUTDOWN_GRACE_MS + 2_000
+    let survivors = victims
+    while (survivors.length > 0 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 250))
+      const next: number[] = []
+      for (const pid of survivors) {
+        try {
+          if (isStoppableDaemonCommand(await commandLineForPid(pid))) next.push(pid)
+        } catch { /* exited */ }
+      }
+      survivors = next
+    }
+    for (const pid of survivors) {
+      await execFileP('taskkill.exe', ['/PID', String(pid), '/T', '/F']).catch(() => {})
+    }
+    for (const pid of victims) await rm(windowsShutdownRequestPath(pid), { force: true }).catch(() => {})
+    const forceDeadline = Date.now() + 2_000
+    let remaining = (await windowsDaemonProcesses()).filter((item) =>
+      item.ProcessId !== process.pid && item.ProcessId !== process.ppid &&
+      isStoppableDaemonCommand(item.CommandLine))
+    while (remaining.length > 0 && Date.now() < forceDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      remaining = (await windowsDaemonProcesses()).filter((item) =>
+        item.ProcessId !== process.pid && item.ProcessId !== process.ppid &&
+        isStoppableDaemonCommand(item.CommandLine))
+    }
+    if (remaining.length > 0) {
+      throw new Error(`Windows daemon process(es) still running: ${remaining.map((item) => item.ProcessId).join(', ')}`)
+    }
+  } else {
+    for (const pid of victims) { try { process.kill(pid, 'SIGTERM') } catch { /* gone */ } }
+    if (victims.length > 0) {
+      await new Promise((r) => setTimeout(r, 1500))
+      for (const pid of victims) { try { process.kill(pid, 0); process.kill(pid, 'SIGKILL') } catch { /* already exited */ } }
+    }
+  }
   if (victims.length > 0) {
-    await new Promise((r) => setTimeout(r, 1500))
-    for (const pid of victims) { try { process.kill(pid, 0); process.kill(pid, 'SIGKILL') } catch { /* already exited */ } }
-    console.log(`[computer] killed ${victims.length} running daemon process(es)`)
+    console.log(`[computer] stopped ${victims.length} running daemon process(es)`)
   }
   await rm(RUNNING_STATE_PATH, { force: true }).catch(() => {})
 }
@@ -2762,12 +3048,16 @@ async function killRunningDaemons(): Promise<void> {
  *  can't relaunch it) AND kill any daemon process still running. After this the
  *  agents are fully offline until you re-pair / re-install. */
 async function stopService(): Promise<void> {
-  if (isServiceInstalled()) {
+  if (process.platform === 'win32') {
+    // Always clean up on Windows: a manually deleted task may still have left a
+    // watchdog process or script behind, and that watchdog can relaunch a daemon.
+    await uninstallService()
+  } else if (await isServiceInstalled()) {
     await uninstallService() // removes the plist/unit + unloads → kills the supervised process
   } else {
     console.log('[computer] no background service installed — killing any running daemon process directly.')
   }
-  await killRunningDaemons()
+  if (process.platform !== 'win32') await killRunningDaemons()
   console.log('[computer] stopped — service removed and daemon process(es) killed. Re-pair to start again: npx cumora@latest agent computer --pair <code>')
 }
 
@@ -2780,7 +3070,7 @@ async function printStatus(): Promise<void> {
   // so we report the service's running version separately, read from its log.
   console.log(`cli:     cumora ${CURRENT_VERSION} (this command)`)
   console.log(cfg ? `paired:  computer ${cfg.computerId} @ ${cfg.serverUrl}` : 'paired:  NO — run: npx cumora@latest agent computer --pair <code>')
-  if (!isServiceInstalled()) {
+  if (!(await isServiceInstalled())) {
     console.log('service: not installed — run: npx cumora@latest agent computer --install-service')
     return
   }
@@ -2800,6 +3090,16 @@ async function printStatus(): Promise<void> {
     const pid = await execFileP('systemctl', ['--user', 'show', 'cumora', '-p', 'MainPID', '--value']).then((r) => r.stdout.trim()).catch(() => '')
     livePid = pid && pid !== '0' ? Number(pid) : null
     console.log(`service: installed · ${active}${livePid ? ` (pid ${livePid})` : ''}`)
+  } else if (process.platform === 'win32') {
+    try {
+      const state = JSON.parse(await readFile(RUNNING_STATE_PATH, 'utf8')) as { pid?: number }
+      if (typeof state.pid === 'number' && isStoppableDaemonCommand(await commandLineForPid(state.pid))) {
+        livePid = state.pid
+      }
+    } catch { /* task is between restarts or has not started yet */ }
+    console.log(livePid
+      ? `service: installed · running (pid ${livePid}, Task Scheduler)`
+      : `service: installed · registered in Task Scheduler`)
   }
   const running = await resolveRunningVersion(livePid)
   if (running) {
@@ -2841,8 +3141,8 @@ async function resolveRunningVersion(livePid: number | null): Promise<string> {
   } catch { return '' }
 }
 
-/** `--logs`: follow the service's output. macOS tails the log file; Linux
- *  streams journald (systemd doesn't write a file). Runs until Ctrl+C. */
+/** `--logs`: follow the service's output. macOS/Windows tail the log file;
+ *  Linux streams journald (systemd doesn't write a file). Runs until Ctrl+C. */
 async function tailLogs(): Promise<void> {
   if (process.platform === 'linux') {
     await new Promise<void>((resolve) => {
@@ -2857,7 +3157,12 @@ async function tailLogs(): Promise<void> {
     return
   }
   await new Promise<void>((resolve) => {
-    const c = spawn('tail', ['-n', '100', '-f', logPath], { stdio: 'inherit' })
+    const c = process.platform === 'win32'
+      ? spawn('powershell.exe', [
+          '-NoProfile', '-NonInteractive', '-Command',
+          `Get-Content -LiteralPath ${quotePowerShell(logPath)} -Encoding UTF8 -Tail 100 -Wait`,
+        ], { stdio: 'inherit' })
+      : spawn('tail', ['-n', '100', '-f', logPath], { stdio: 'inherit' })
     c.on('close', () => resolve()); c.on('error', () => resolve())
   })
 }
@@ -2948,7 +3253,7 @@ export async function runComputerDaemon(argv: string[]): Promise<void> {
   // Re-paired on a machine already managed by the background service: reload
   // the service so it adopts the new config (e.g. moved to another company),
   // instead of starting a SECOND foreground daemon that races the service.
-  if (args.pair && isServiceInstalled()) {
+  if (args.pair && await isServiceInstalled()) {
     await reloadService()
     console.log(`[computer] re-paired — reloaded the background service with the new config. (No foreground daemon needed; you can close this terminal.)`)
     return

@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api, getPairingServerOrigin } from '@/api/client'
 import { useComputers } from '@/stores/computers'
-import { isWindows } from '@/lib/runtime'
 import { TitleBar } from '@/desktop/TitleBar'
 import { useT } from '@/lib/i18n'
 
@@ -23,12 +22,10 @@ export function Onboarding() {
   // append `--engine claude` so a Claude-less machine still auto-detects rather
   // than erroring on a Claude it doesn't have.
   const [engine, setEngine] = useState<'claude' | 'codex' | 'grok' | 'cursor'>('claude')
-  // Default to installing the always-on service: it auto-starts on boot,
+  // Default to installing the always-on service: it auto-starts at sign-in,
   // auto-restarts on crash, and auto-updates — so the user isn't tied to a
   // terminal that must stay open. Appends `--install-service` to the command.
-  // `--install-service` only supports macOS + Linux (the daemon throws on
-  // Windows), so default it off there and hide the option entirely.
-  const [asService, setAsService] = useState(!isWindows)
+  const [asService, setAsService] = useState(true)
 
   useEffect(() => { void useComputers.getState().refresh() }, [])
   useEffect(() => {
@@ -102,19 +99,12 @@ export function Onboarding() {
                   </div>
                   <span className="text-[11px] text-ink-400">{t('onboard.engineHint')}</span>
                 </div>
-                {isWindows ? (
-                  <div className="mb-2.5 text-[12px] text-ink-600">
-                    {t('onboard.windowsKeep')}
-                    <span className="text-ink-400"> — {t('onboard.windowsServiceNote')}</span>
-                  </div>
-                ) : (
-                  <label className="flex items-start gap-2 mb-2.5 cursor-pointer select-none">
-                    <input type="checkbox" checked={asService} onChange={(e) => setAsService(e.target.checked)} className="mt-[3px]" />
-                    <span className="text-[12px] text-ink-600">
-                      {t('onboard.background')} <span className="text-ink-400">{t('onboard.backgroundDetail')}</span>
-                    </span>
-                  </label>
-                )}
+                <label className="flex items-start gap-2 mb-2.5 cursor-pointer select-none">
+                  <input type="checkbox" checked={asService} onChange={(e) => setAsService(e.target.checked)} className="mt-[3px]" />
+                  <span className="text-[12px] text-ink-600">
+                    {t('onboard.background')} <span className="text-ink-400">{t('onboard.backgroundDetail')}</span>
+                  </span>
+                </label>
                 <pre className="bg-ink-900 text-cloud rounded-[10px] p-3 text-[12px] overflow-x-auto whitespace-pre-wrap break-all font-mono select-all">{cmd}</pre>
                 <div className="flex items-center gap-3 mt-3">
                   <button onClick={() => { void navigator.clipboard?.writeText(cmd); setCopied(true) }}
