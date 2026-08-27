@@ -27,7 +27,7 @@ import { promisify } from 'node:util'
 
 const execFileP = promisify(execFile)
 import { parseSseStream, wakeStreamWasStable } from '../runtime/sse-parse.js'
-import { detectEngines, getAdapter, ENGINE_IDS, runEngineDoctor, type EngineId, type EngineSession, type EngineRunResult, type EngineUsage, type EngineHopReport } from './engine.js'
+import { detectEngines, detectEnginesWithStatus, getAdapter, ENGINE_IDS, runEngineDoctor, type EngineId, type EngineSession, type EngineRunResult, type EngineUsage, type EngineHopReport } from './engine.js'
 import { usageFromClaude, type TokenUsage } from '../cost.js'
 import { parseTriage, finalizeTriage, isRateLimited } from '../triage-core.js'
 import { GLANCE_YIELD_RULES } from '../glance-protocol.js'
@@ -692,6 +692,26 @@ async function requireLocalEngine(): Promise<EngineId[]> {
   const engines = await detectEngines()
   if (engines.length === 0) throw new Error(missingEngineMessage())
   return engines
+}
+
+/** Resolve the engine a daemon can actually run from its LIVE PATH inventory. */
+export function resolveAvailableEngine(
+  requested: EngineId | null | undefined,
+  available: readonly EngineId[],
+): EngineId | null {
+  return requested && available.includes(requested) ? requested : (available[0] ?? null)
+}
+
+export interface EngineInventory {
+  current: EngineId[]
+}
+
+/** Replace the shared engine inventory after a trustworthy PATH scan. */
+export function replaceEngineInventory(inventory: EngineInventory, next: readonly EngineId[]): boolean {
+  const current = inventory.current
+  const changed = next.length !== current.length || next.some((engine, i) => engine !== current[i])
+  if (changed) inventory.current = [...next]
+  return changed
 }
 
 // ─── config ─────────────────────────────────────────────────────────────
@@ -2409,15 +2429,16 @@ async function doRun(serverOverride?: string): Promise<void> {
     return
   }
   if (serverOverride) cfg.serverUrl = serverOverride
-  let available: EngineId[]
+  let initialEngines: EngineId[]
   try {
-    available = await requireLocalEngine()
+    initialEngines = await requireLocalEngine()
   } catch (err) {
     console.error(`[computer] ${err instanceof Error ? err.message : String(err)}`)
     process.exitCode = 70
     return
   }
-  console.log(`[computer] cumora ${CURRENT_VERSION} · starting ${cfg.computerId} @ ${cfg.serverUrl} (engines: ${available.join(', ')})`)
+  const engineInventory: EngineInventory = { current: initialEngines }
+  console.log(`[computer] cumora ${CURRENT_VERSION} · starting ${cfg.computerId} @ ${cfg.serverUrl} (engines: ${engineInventory.current.join(', ')})`)
   // Record what THIS process is running, keyed by pid, so `--status` can report
   // the version of the live service instance reliably (cross-checked against the
   // running pid — survives log rotation, no log-scraping).
@@ -2442,10 +2463,21 @@ async function doRun(serverOverride?: string): Promise<void> {
       console.warn('[computer] agent sync failed:', err instanceof Error ? err.message : err)
       return
     }
+    const available = engineInventory.current
     for (const agent of agents) {
-      const engine: EngineId | null =
-        agent.engine && available.includes(agent.engine) ? agent.engine : (available[0] ?? null)
-      if (!engine) continue
+      const engine = resolveAvailableEngine(agent.engine, available)
+      if (!engine) {
+        // A successful rescan may legitimately find that the last installed CLI
+        // was removed. Stop an existing runner instead of leaving it alive on an
+        // engine this machine no longer has.
+        const existing = runners.get(agent.id)
+        if (existing) {
+          console.log(`[computer] no installed engine remains for ${agent.name} (${agent.id}) → stopping runner`)
+          existing.stop()
+          runners.delete(agent.id)
+        }
+        continue
+      }
       const existing = runners.get(agent.id)
       if (existing) {
         if (existing.configMatches(agent, engine)) continue
@@ -2471,14 +2503,17 @@ async function doRun(serverOverride?: string): Promise<void> {
   // on every heartbeat so installing another supported CLI takes effect without
   // re-pairing — the daemon is already online and can see PATH itself, so there
   // is no reason to make the user mint a new pairing token for it.
-  let detectedEngines: EngineId[] = await detectEngines()
   const rescanEngines = async (): Promise<void> => {
     try {
-      const next = await detectEngines()
-      if (next.length === 0) return  // broken PATH / mid-upgrade — keep the last good list
-      const changed = next.length !== detectedEngines.length || next.some((e, i) => e !== detectedEngines[i])
-      if (changed) console.log(`[computer] engines on PATH changed: ${detectedEngines.join(', ') || 'none'} → ${next.join(', ')}`)
-      detectedEngines = next
+      const detected = await detectEnginesWithStatus()
+      if (!detected.reliable) return  // broken `which` / `where` — keep the last good list
+      const next = detected.engines
+      const previous = engineInventory.current
+      const changed = replaceEngineInventory(engineInventory, next)
+      if (changed) console.log(`[computer] engines on PATH changed: ${previous.join(', ') || 'none'} → ${next.join(', ') || 'none'}`)
+      // This is the same live inventory sync() uses to choose an agent's
+      // adapter. Updating only a heartbeat cache would advertise a newly
+      // installed engine while silently running that agent on the old default.
     } catch { /* transient — the next tick retries */ }
   }
 
@@ -2493,7 +2528,7 @@ async function doRun(serverOverride?: string): Promise<void> {
         // `supervised` tells the server HOW this daemon runs (service vs. a
         // foreground command), so the app's upgrade banner can show the right
         // update instructions for this machine.
-        body: JSON.stringify({ version: CURRENT_VERSION, supervised: SUPERVISED, engines: detectedEngines }),
+        body: JSON.stringify({ version: CURRENT_VERSION, supervised: SUPERVISED, engines: engineInventory.current }),
       })
     } catch { /* transient — next tick retries */ }
   }

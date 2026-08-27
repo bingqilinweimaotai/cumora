@@ -326,13 +326,24 @@ export interface EngineAdapter {
 /** The trivial prompt a `doctor` probe sends — one token of real work. */
 const DOCTOR_PROMPT = 'Connectivity check. Reply with exactly: OK'
 
-/** True if a binary is resolvable on PATH. */
-export async function binOnPath(bin: string): Promise<boolean> {
+type BinPathProbe = 'present' | 'absent' | 'error'
+
+/** Probe a binary without conflating "not installed" with an inability to run
+ *  the platform's PATH resolver at all. The distinction matters to the daemon's
+ *  periodic refresh: a healthy scan that finds nothing should clear a stale
+ *  inventory, while a missing/broken `which` or `where` should retain the last
+ *  known-good result. */
+async function probeBinOnPath(bin: string): Promise<BinPathProbe> {
   return new Promise((resolve) => {
     const probe = spawn(process.platform === 'win32' ? 'where' : 'which', [bin], { stdio: 'ignore' })
-    probe.on('error', () => resolve(false))
-    probe.on('close', (code) => resolve(code === 0))
+    probe.on('error', () => resolve('error'))
+    probe.on('close', (code) => resolve(code === 0 ? 'present' : code === 1 ? 'absent' : 'error'))
   })
+}
+
+/** True if a binary is resolvable on PATH. */
+export async function binOnPath(bin: string): Promise<boolean> {
+  return (await probeBinOnPath(bin)) === 'present'
 }
 
 async function exists(p: string): Promise<boolean> {
@@ -2673,15 +2684,31 @@ export function getAdapter(id: EngineId): EngineAdapter {
   return ADAPTERS[id]
 }
 
+export interface EngineDetection {
+  engines: EngineId[]
+  /** False when `which` / `where` itself failed, so missing engines cannot be
+   *  distinguished from a broken scan and callers should keep their last good
+   *  inventory. */
+  reliable: boolean
+}
+
+/** Probe which engines are installed and whether absence is trustworthy. */
+export async function detectEnginesWithStatus(): Promise<EngineDetection> {
+  const ids = Object.keys(ADAPTERS) as EngineId[]
+  const probes = await Promise.all(ids.map(async (id) => {
+    const status = await probeBinOnPath(ADAPTERS[id].bin)
+    const installed = status === 'present' || (id === 'grok' && resolveGrokBin() != null)
+    return { id, installed, status }
+  }))
+  return {
+    engines: probes.filter((p) => p.installed).map((p) => p.id),
+    reliable: probes.every((p) => p.status !== 'error'),
+  }
+}
+
 /** Probe which engines are installed on this machine. */
 export async function detectEngines(): Promise<EngineId[]> {
-  const ids = Object.keys(ADAPTERS) as EngineId[]
-  const present = await Promise.all(ids.map(async (id) => {
-    if (await binOnPath(ADAPTERS[id].bin)) return id
-    if (id === 'grok' && resolveGrokBin()) return id
-    return null
-  }))
-  return present.filter((x): x is EngineId => x !== null)
+  return (await detectEnginesWithStatus()).engines
 }
 
 /** Resolve a bin's absolute path on PATH (the first hit), or null if absent. */

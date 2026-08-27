@@ -56,15 +56,18 @@ const PAIRABLE_ENGINES: ReadonlySet<string> = new Set(['claude', 'codex', 'grok'
  *  stays first, and the rest follow detection order. Installing a new CLI adds
  *  it to the tail; uninstalling one drops it.
  *
- *  Returns null when there is nothing to write — an empty or fully-unknown
- *  detection, or a list identical to what is stored. A daemon that reports no
- *  engines (a broken PATH, a half-finished upgrade) must NOT wipe a computer's
- *  engines and un-assign every agent on it.
+ *  Returns null when there is nothing to write — a fully-unknown detection or a
+ *  list identical to what is stored. An explicitly empty detection is valid:
+ *  the daemon only reports it after a successful scan, so it means the final
+ *  supported CLI was uninstalled and the stale inventory must be cleared.
  *
  *  Exported for tests. */
 export function mergeDetectedEngines(current: string[], detected: string[]): string[] | null {
   const fresh = detected.filter((e) => PAIRABLE_ENGINES.has(e))
-  if (fresh.length === 0) return null
+  // Non-empty but entirely unknown means a newer daemon is naming only engines
+  // this server cannot run yet. Do not let that compatibility case wipe known
+  // state; [] itself remains a trustworthy, successful empty PATH scan.
+  if (detected.length > 0 && fresh.length === 0) return null
   const seen = new Set<string>()
   const next: string[] = []
   const currentDefault = current[0]
@@ -315,7 +318,7 @@ export async function heartbeatComputer(
   // already online and re-scans PATH, so installing another supported CLI shows
   // up here instead of requiring the user to mint a new pairing token. Only for
   // paired computers: a cloud computer advertises 'managed' and has no PATH.
-  if (detectedEngines && detectedEngines.length > 0) {
+  if (detectedEngines) {
     const { rows } = await pool.query<{ available_engines: string[]; kind: ComputerKind }>(
       `SELECT available_engines, kind FROM computers WHERE id = $1 AND revoked_at IS NULL`,
       [computerId],

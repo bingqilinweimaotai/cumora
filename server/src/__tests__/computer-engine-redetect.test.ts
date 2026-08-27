@@ -9,7 +9,7 @@
  *
  * Run: node --import tsx --test server/src/__tests__/computer-engine-redetect.test.ts
  */
-import { test } from 'node:test'
+import { afterEach, test } from 'node:test'
 import assert from 'node:assert/strict'
 
 // Same shape as agent-computer-pairing-token.test.ts: pin the HTTP runtime
@@ -17,7 +17,14 @@ import assert from 'node:assert/strict'
 // client's dependency graph into a unit run.
 process.env.CUMORA_RUNTIME_CLIENT = 'http'
 
-const { mergeDetectedEngines } = await import('../agents/computer/registry.js')
+const { heartbeatComputer, mergeDetectedEngines } = await import('../agents/computer/registry.js')
+const { pool } = await import('../db/pool.js')
+
+const originalQuery = pool.query.bind(pool)
+
+afterEach(() => {
+  ;(pool as unknown as { query: typeof originalQuery }).query = originalQuery
+})
 
 test('a newly installed engine is appended without re-pairing', () => {
   // The reported case: the user installs another CLI after pairing.
@@ -47,10 +54,14 @@ test('an unchanged list writes nothing', () => {
   assert.equal(mergeDetectedEngines(['claude', 'codex'], ['claude', 'codex']), null)
 })
 
-test('an empty detection never wipes the stored engines', () => {
-  // A broken PATH or a half-finished CLI upgrade must not un-assign every agent
-  // on the machine.
-  assert.equal(mergeDetectedEngines(['claude'], []), null)
+test('a successful empty detection clears the last uninstalled engine', () => {
+  // The daemon retains its last-good list when `which` / `where` fails, so an
+  // explicitly reported [] is a trustworthy scan where no engine remains.
+  assert.deepEqual(mergeDetectedEngines(['claude'], []), [])
+})
+
+test('an unchanged empty list writes nothing', () => {
+  assert.equal(mergeDetectedEngines([], []), null)
 })
 
 test('a detection of only unknown ids is treated as empty', () => {
@@ -72,4 +83,25 @@ test('duplicates in a detection are collapsed', () => {
 
 test('a computer with no stored engines adopts the detection order', () => {
   assert.deepEqual(mergeDetectedEngines([], ['claude', 'codex']), ['claude', 'codex'])
+})
+
+test('heartbeat persists a successful empty detection', async () => {
+  const calls: Array<{ sql: string; params: unknown[] }> = []
+  ;(pool as unknown as {
+    query: (sql: string, params?: unknown[]) => Promise<{ rows: unknown[]; rowCount: number }>
+  }).query = async (sql: string, params: unknown[] = []) => {
+    calls.push({ sql, params })
+    if (/SELECT available_engines/.test(sql)) {
+      return { rows: [{ available_engines: ['claude'], kind: 'local' }], rowCount: 1 }
+    }
+    if (/UPDATE computers SET available_engines/.test(sql)) return { rows: [], rowCount: 1 }
+    if (/UPDATE computers SET last_seen_at/.test(sql)) return { rows: [], rowCount: 1 }
+    throw new Error(`unexpected query: ${sql}`)
+  }
+
+  await heartbeatComputer('comp-1', undefined, undefined, [])
+
+  const inventoryUpdate = calls.find((c) => /UPDATE computers SET available_engines/.test(c.sql))
+  assert.ok(inventoryUpdate)
+  assert.equal(inventoryUpdate.params[1], '[]')
 })
