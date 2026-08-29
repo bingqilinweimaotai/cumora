@@ -3569,10 +3569,13 @@ async function spawnGeminiStream(
  *
  *  `tools.core` is an allowlist, and the registry applies it as
  *  `coreTools.some(...)` per tool — an EMPTY array is truthy, matches nothing,
- *  and so registers nothing. That is a stronger guarantee than triage gets on
- *  other engines: with no tool to confirm, a headless approval prompt (which
- *  nothing would answer) cannot arise, and the classifier stays a one-shot. */
-const GEMINI_TRIAGE_SETTINGS = JSON.stringify({ tools: { core: [] } })
+ *  and so registers no built-in tools. User settings and installed extensions
+ *  can also contribute MCP servers; the system-scope empty MCP allowlist joins
+ *  every configured allowlist by intersection, so none of those servers can
+ *  register tools either. With no tool to confirm, a headless approval prompt
+ *  (which nothing would answer) cannot arise, and the classifier stays a
+ *  one-shot. */
+const GEMINI_TRIAGE_SETTINGS = JSON.stringify({ tools: { core: [] }, mcp: { allowed: [] } })
 const GEMINI_TRIAGE_SETTINGS_FILE = '.cumora-gemini-triage.json'
 
 class GeminiAdapter implements EngineAdapter {

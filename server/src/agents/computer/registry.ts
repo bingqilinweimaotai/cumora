@@ -45,7 +45,7 @@ export async function announceComputerOnline(computerId: string, companyId: stri
 }
 
 /** Engines a paired (non-cloud) computer is allowed to advertise. */
-const PAIRABLE_ENGINES: ReadonlySet<string> = new Set(['claude', 'codex', 'grok', 'cursor', 'opencode', 'pi'])
+const PAIRABLE_ENGINES: ReadonlySet<string> = new Set(['claude', 'codex', 'grok', 'cursor', 'opencode', 'pi', 'gemini'])
 
 /** Merge a fresh PATH detection into a computer's advertised engine list.
  *
@@ -85,6 +85,7 @@ const ENGINE_BINS: Record<string, string> = {
   cursor: 'cursor-agent',
   opencode: 'opencode',
   pi: 'pi',
+  gemini: 'gemini',
 }
 
 /** Cached PATH snapshot from the daemon. The app reads this; it never probes. */

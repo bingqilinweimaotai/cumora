@@ -45,11 +45,12 @@ after(async () => {
 test('sanitizeDetectedEngines drops unknown ids and fills missing bins', () => {
   const out = registry.sanitizeDetectedEngines(
     [{ id: 'claude', bin: 'claude', path: '/usr/bin/claude' }, { id: 'bogus', bin: 'x', path: null }],
-    ['claude', 'codex', 'bogus'],
+    ['claude', 'codex', 'gemini', 'bogus'],
   )
   assert.deepEqual(out, [
     { id: 'claude', bin: 'claude', path: '/usr/bin/claude' },
     { id: 'codex', bin: 'codex', path: null },
+    { id: 'gemini', bin: 'gemini', path: null },
   ])
 })
 

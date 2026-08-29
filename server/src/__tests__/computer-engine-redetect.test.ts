@@ -67,13 +67,13 @@ test('an unchanged empty list writes nothing', () => {
 test('a detection of only unknown ids is treated as empty', () => {
   // A newer daemon reporting an engine this server has no adapter for must not
   // clear the list either.
-  assert.equal(mergeDetectedEngines(['claude'], ['gemini', 'hermes']), null)
+  assert.equal(mergeDetectedEngines(['claude'], ['qwen', 'hermes']), null)
 })
 
 test('unknown ids are filtered out but known ones still apply', () => {
   assert.deepEqual(
     mergeDetectedEngines(['claude'], ['claude', 'gemini', 'opencode']),
-    ['claude', 'opencode'],
+    ['claude', 'gemini', 'opencode'],
   )
 })
 

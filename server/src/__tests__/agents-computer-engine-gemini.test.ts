@@ -298,12 +298,11 @@ test('triage runs tool-free on the cheap model', { skip: IS_WIN }, async () => {
 
   assert.equal(call.argv[call.argv.indexOf('--model') + 1], 'gemini-2.5-flash-lite')
   assert.ok(call.settingsPath, 'triage must point gemini at a settings file')
-  // `tools.core` is an allowlist applied per tool as `coreTools.some(...)`. An
-  // empty array is truthy and matches nothing, so NO core tool is registered —
-  // and with no tool to confirm, a headless approval prompt that nothing would
-  // answer cannot arise.
+  // Core tools and user/extension MCP tools are separate registries. Empty
+  // allowlists at system scope close both paths, including MCP servers inherited
+  // from the operator's user settings.
   const settings = JSON.parse(await readFile(call.settingsPath as string, 'utf8'))
-  assert.deepEqual(settings, { tools: { core: [] } })
+  assert.deepEqual(settings, { tools: { core: [] }, mcp: { allowed: [] } })
 })
 
 test('concurrent triage shares one cwd cleanly and leaves no staging files', { skip: IS_WIN }, async () => {
