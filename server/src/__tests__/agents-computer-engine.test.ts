@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os'
 import { delimiter, join } from 'node:path'
 import { afterEach, test } from 'node:test'
 import { setTimeout as delay } from 'node:timers/promises'
-import { getAdapter, resolveSpawn, type EngineHopReport, type EngineRunResult } from '../agents/computer/engine.js'
+import { getAdapter, headlessSpawnOptions, resolveSpawn, type EngineHopReport, type EngineRunResult } from '../agents/computer/engine.js'
 
 const IS_WIN = process.platform === 'win32'
 const ORIGINAL_PATH = process.env.PATH
@@ -18,6 +18,14 @@ const tempDirs: string[] = []
 // Sessions spawn a child process. Track them so a FAILING assertion still tears
 // the child down — otherwise it outlives the test and the runner never exits.
 const liveSessions: Array<{ stop(): void }> = []
+
+test('engine subprocesses always suppress Windows console windows', () => {
+  assert.deepEqual(headlessSpawnOptions({ shell: true, cwd: 'C:\\agent home', windowsHide: false }), {
+    shell: true,
+    cwd: 'C:\\agent home',
+    windowsHide: true,
+  })
+})
 
 afterEach(async () => {
   for (const s of liveSessions.splice(0)) { try { s.stop() } catch { /* already gone */ } }

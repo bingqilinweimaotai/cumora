@@ -2658,6 +2658,10 @@ function windowsSupervisorPath(): string {
   return join(CONFIG_DIR, 'daemon-supervisor.ps1')
 }
 
+function windowsSupervisorLauncherPath(): string {
+  return join(CONFIG_DIR, 'daemon-supervisor.vbs')
+}
+
 function windowsSupervisorDisabledPath(): string {
   return join(CONFIG_DIR, 'daemon-supervisor.disabled')
 }
@@ -2694,17 +2698,36 @@ export function renderWindowsSupervisor(
   ].join('\r\n')
 }
 
-export function windowsScheduledTaskCommand(scriptPath: string): string {
-  return `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "${scriptPath.replaceAll('"', '""')}"`
+function quoteVbScript(value: string): string {
+  return `"${value.replaceAll('"', '""')}"`
+}
+
+/** Task Scheduler's interactive PowerShell action can still acquire a visible
+ *  Windows Terminal host on Windows 11, even with `-WindowStyle Hidden`. Launch
+ *  through the GUI-subsystem wscript.exe instead; WScript.Shell.Run's window
+ *  style 0 keeps PowerShell and its watchdog process tree hidden from birth. */
+export function renderWindowsSupervisorLauncher(scriptPath: string): string {
+  const command = `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "${scriptPath.replaceAll('"', '""')}"`
+  return [
+    'Set shell = CreateObject("WScript.Shell")',
+    // Wait for the watchdog so Task Scheduler keeps the task in Running state
+    // and refuses duplicate /Run requests while this supervisor is alive.
+    `shell.Run ${quoteVbScript(command)}, 0, True`,
+    '',
+  ].join('\r\n')
+}
+
+export function windowsScheduledTaskCommand(launcherPath: string): string {
+  return `wscript.exe //B //Nologo "${launcherPath.replaceAll('"', '""')}"`
 }
 
 export function windowsScheduledTaskCreateArgs(
-  scriptPath: string,
+  launcherPath: string,
   taskName = windowsTaskName(),
 ): string[] {
   return [
     '/Create', '/TN', taskName,
-    '/TR', windowsScheduledTaskCommand(scriptPath),
+    '/TR', windowsScheduledTaskCommand(launcherPath),
     '/SC', 'ONLOGON', '/RL', 'LIMITED', '/IT', '/F',
   ]
 }
@@ -2797,14 +2820,16 @@ WantedBy=default.target
 
   if (process.platform === 'win32') {
     const scriptPath = windowsSupervisorPath()
+    const launcherPath = windowsSupervisorLauncherPath()
     const disabledPath = windowsSupervisorDisabledPath()
     const taskName = windowsTaskName()
     const replacing = await isWindowsTaskInstalled(taskName)
     await writeFile(scriptPath, renderWindowsSupervisor(npx, serverUrl, logPath, disabledPath), 'utf8')
+    await writeFile(launcherPath, renderWindowsSupervisorLauncher(scriptPath), 'utf8')
     try {
-      if (!replacing) {
-        await execFileP('schtasks.exe', windowsScheduledTaskCreateArgs(scriptPath, taskName))
-      }
+      // Always recreate with /F: an existing task may still point at the old
+      // direct-PowerShell action, so merely replacing the scripts is not enough.
+      await execFileP('schtasks.exe', windowsScheduledTaskCreateArgs(launcherPath, taskName))
       await execFileP('powershell.exe', [
         '-NoProfile', '-NonInteractive', '-Command', windowsScheduledTaskSettingsCommand(taskName),
       ])
@@ -2816,6 +2841,7 @@ WantedBy=default.target
           throw new Error(`scheduled task setup failed and rollback could not delete '${taskName}'; the watchdog script was kept in place (${rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr)})`, { cause: err })
         }
         await rm(scriptPath, { force: true }).catch(() => {})
+        await rm(launcherPath, { force: true }).catch(() => {})
       }
       throw err
     }
@@ -2869,6 +2895,7 @@ async function uninstallService(): Promise<void> {
       throw new Error(`scheduled task '${taskName}' still exists after deletion`)
     }
     await rm(windowsSupervisorPath(), { force: true })
+    await rm(windowsSupervisorLauncherPath(), { force: true })
     // Keep this sentinel on every failed stop path so a surviving watchdog
     // cannot revive a daemon after the command has reported an error.
     await rm(disabledPath, { force: true })

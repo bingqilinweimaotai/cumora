@@ -4,6 +4,7 @@ import {
   isWindowsSupervisorProcess,
   parseWindowsProcessList,
   renderWindowsSupervisor,
+  renderWindowsSupervisorLauncher,
   resolveNpx,
   windowsScheduledTaskCommand,
   windowsScheduledTaskCreateArgs,
@@ -40,14 +41,19 @@ test('Windows supervisor restarts the latest daemon with supervision enabled', (
 
 test('Windows scheduled task runs the watchdog at login with limited privileges', () => {
   const scriptPath = 'C:\\Users\\Test User\\.cumora\\daemon-supervisor.ps1'
+  const launcherPath = 'C:\\Users\\Test User\\.cumora\\daemon-supervisor.vbs'
   const taskName = windowsTaskName('C:\\Users\\Test User')
+  const launcher = renderWindowsSupervisorLauncher(scriptPath)
+  assert.match(launcher, /CreateObject\("WScript\.Shell"\)/)
+  assert.match(launcher, /powershell\.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File ""C:\\Users\\Test User\\\.cumora\\daemon-supervisor\.ps1""/)
+  assert.match(launcher, /, 0, True/)
   assert.equal(
-    windowsScheduledTaskCommand(scriptPath),
-    'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "C:\\Users\\Test User\\.cumora\\daemon-supervisor.ps1"',
+    windowsScheduledTaskCommand(launcherPath),
+    'wscript.exe //B //Nologo "C:\\Users\\Test User\\.cumora\\daemon-supervisor.vbs"',
   )
-  assert.deepEqual(windowsScheduledTaskCreateArgs(scriptPath, taskName), [
+  assert.deepEqual(windowsScheduledTaskCreateArgs(launcherPath, taskName), [
     '/Create', '/TN', taskName,
-    '/TR', windowsScheduledTaskCommand(scriptPath),
+    '/TR', windowsScheduledTaskCommand(launcherPath),
     '/SC', 'ONLOGON', '/RL', 'LIMITED', '/IT', '/F',
   ])
 

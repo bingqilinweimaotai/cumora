@@ -20,7 +20,7 @@
  * loop does not depend on the structured output — the agent acts via the
  * `cumora` tool regardless of how we parse stdout.
  */
-import { spawn, execFileSync, type ChildProcess } from 'node:child_process'
+import { spawn as nodeSpawn, execFileSync, type ChildProcess, type SpawnOptions } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { mkdir, writeFile, access, mkdtemp } from 'node:fs/promises'
 import { existsSync, writeFileSync } from 'node:fs'
@@ -30,6 +30,22 @@ import { StringDecoder } from 'node:string_decoder'
 import { stripLoneSurrogates } from '../text-safety.js'
 
 const IS_WIN = process.platform === 'win32'
+
+/** Every engine runs headlessly behind the daemon. On Windows, leaving
+ *  `windowsHide` at Node's default (`false`) lets a console executable (or the
+ *  cmd.exe needed for an npm .cmd shim) create a visible terminal even when the
+ *  PowerShell watchdog itself was launched with `-WindowStyle Hidden`.
+ *
+ *  Keep this in the module-local spawn wrapper so persistent sessions, one-shot
+ *  turns, doctor probes, and PATH probes cannot drift apart. `windowsHide` is
+ *  ignored on non-Windows platforms. */
+export function headlessSpawnOptions(options: SpawnOptions = {}): SpawnOptions {
+  return { ...options, windowsHide: true }
+}
+
+function spawn(command: string, args: string[], options: SpawnOptions = {}): ChildProcess {
+  return nodeSpawn(command, args, headlessSpawnOptions(options))
+}
 
 // Optional last-resort cap on a single persistent-engine turn. DEFAULT OFF (0):
 // a wall-clock timeout CANNOT tell a genuinely-hung turn from a legitimately
