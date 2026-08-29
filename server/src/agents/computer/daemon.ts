@@ -2955,26 +2955,41 @@ async function reloadService(): Promise<void> {
 /** `--restart`: a friendly wrapper so users don't have to remember
  *  `launchctl kickstart …`. Restarts the installed service (which relaunches on
  *  cumora@latest, so it's also the "apply the update now" button). */
-async function restartService(): Promise<void> {
-  if (!(await isServiceInstalled())) {
+interface RestartServiceHooks {
+  platform?: NodeJS.Platform
+  isServiceInstalled?: () => Promise<boolean>
+  loadConfig?: () => Promise<DaemonConfig | null>
+  installService?: (serverUrl: string) => Promise<void>
+  reloadService?: () => Promise<void>
+}
+
+export async function restartService(hooks: RestartServiceHooks = {}): Promise<void> {
+  const platform = hooks.platform ?? process.platform
+  const serviceInstalled = hooks.isServiceInstalled ?? isServiceInstalled
+  if (!(await serviceInstalled())) {
     console.log('[computer] service not installed — run: npx cumora@latest agent computer --install-service')
     return
   }
-  if (process.platform === 'darwin') {
+  if (platform === 'win32') {
+    const cfg = await (hooks.loadConfig ?? loadConfig)()
+    if (!cfg) throw new Error('pair this computer first: cumora agent computer --pair <code>')
+    await (hooks.installService ?? installService)(cfg.serverUrl)
+    console.log('[computer] Windows service refreshed and restarted — its supervisor now launches cumora@latest')
+  } else if (platform === 'darwin') {
     const uid = process.getuid?.() ?? 0
     try {
       await execFileP('launchctl', ['kickstart', '-k', `gui/${uid}/${SERVICE_LABEL}`])
     } catch {
-      await reloadService() // not currently loaded → load it
+      await (hooks.reloadService ?? reloadService)() // not currently loaded → load it
     }
-  } else if (process.platform === 'linux') {
-    await execFileP('systemctl', ['--user', 'restart', 'cumora'])
-  } else if (process.platform === 'win32') {
-    await reloadService()
+  } else if (platform === 'linux') {
+    await (hooks.reloadService ?? reloadService)()
   } else {
-    throw new Error(`--restart is not supported on ${process.platform}`)
+    throw new Error(`--restart is not supported on ${platform}`)
   }
-  console.log('[computer] service restarted — it relaunches on cumora@latest (also applies any pending update). Check: npx cumora@latest agent computer --status')
+  if (platform !== 'win32') {
+    console.log('[computer] service restarted — it relaunches on cumora@latest (also applies any pending update). Check: npx cumora@latest agent computer --status')
+  }
 }
 
 /** `--stop`: stop the background service NOW, without uninstalling it. The job is

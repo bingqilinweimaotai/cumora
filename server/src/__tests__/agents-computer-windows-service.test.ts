@@ -6,6 +6,7 @@ import {
   renderWindowsSupervisor,
   renderWindowsSupervisorLauncher,
   resolveNpx,
+  restartService,
   windowsScheduledTaskCommand,
   windowsScheduledTaskCreateArgs,
   windowsScheduledTaskQueryCommand,
@@ -16,6 +17,23 @@ import {
 test('Windows service resolves the executable command shim', () => {
   assert.equal(resolveNpx('win32', 'Z:\\missing\\node.exe'), 'npx.cmd')
   assert.equal(resolveNpx('linux', '/missing/node'), 'npx')
+})
+
+test('Windows restart refreshes an existing service definition', async () => {
+  const installedUrls: string[] = []
+
+  await restartService({
+    platform: 'win32',
+    isServiceInstalled: async () => true,
+    loadConfig: async () => ({
+      serverUrl: 'https://example.test',
+      computerId: 'comp-test',
+      deviceToken: 'token-test',
+    }),
+    installService: async (serverUrl) => { installedUrls.push(serverUrl) },
+  })
+
+  assert.deepEqual(installedUrls, ['https://example.test'])
 })
 
 test('Windows supervisor restarts the latest daemon with supervision enabled', () => {
