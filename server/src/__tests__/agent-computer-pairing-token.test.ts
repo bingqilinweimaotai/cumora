@@ -52,7 +52,7 @@ test('company add token is persistent and reattaches an existing host by name', 
       return { rows: [{ pair_token: 'company-token' }] }
     }
     if (/UPDATE companies SET pair_token/.test(sql)) return { rowCount: 1 }
-    if (/SELECT id, company_id FROM computers/.test(sql)) return { rows: [] }
+    if (/SELECT id, company_id/.test(sql)) return { rows: [] }
     if (/SELECT id AS company_id, owner_user_id FROM companies/.test(sql)) {
       return { rows: [{ company_id: 'co-1', owner_user_id: 'u-1' }] }
     }
@@ -79,7 +79,7 @@ test('company add token is persistent and reattaches an existing host by name', 
   assert.equal(calls.some((c) => /INSERT INTO computers/.test(c.sql)), false)
 })
 
-test('computer reconnect token is persistent and updates the exact computer row', async () => {
+test('computer reconnect token is persistent, updates the exact row, and preserves its default engine', async () => {
   let computerTokenSelected = false
   const calls = installPoolMock(({ sql }) => {
     if (/SELECT pair_token FROM computers/.test(sql)) {
@@ -90,8 +90,8 @@ test('computer reconnect token is persistent and updates the exact computer row'
       return { rows: [{ pair_token: 'repair-token' }] }
     }
     if (/UPDATE computers SET pair_token/.test(sql)) return { rowCount: 1 }
-    if (/SELECT id, company_id FROM computers/.test(sql)) {
-      return { rows: [{ id: 'comp-old', company_id: 'co-1' }] }
+    if (/SELECT id, company_id/.test(sql)) {
+      return { rows: [{ id: 'comp-old', company_id: 'co-1', available_engines: ['codex', 'claude'] }] }
     }
     if (/UPDATE computers\s+SET credential_hash/.test(sql)) return { rowCount: 1 }
     throw new Error(`unexpected query: ${sql}`)
@@ -103,7 +103,7 @@ test('computer reconnect token is persistent and updates the exact computer row'
   const paired = await registry.pairComputer({
     code: 'repair-token',
     hostName: 'MacBook Air',
-    engines: ['codex'],
+    engines: ['claude', 'codex'],
     deferBroadcast: true,
   })
   assert.equal(paired?.computerId, 'comp-old')
@@ -111,14 +111,14 @@ test('computer reconnect token is persistent and updates the exact computer row'
 
   const update = calls.find((c) => /UPDATE computers\s+SET credential_hash/.test(c.sql))
   assert.ok(update, 'computer-specific token should update the bound row')
-  assert.equal(update.params[1], JSON.stringify(['codex']))
+  assert.equal(update.params[1], JSON.stringify(['codex', 'claude']))
   assert.equal(update.params[2], 'MacBook Air')
   assert.equal(update.params[3], 'comp-old')
 })
 
 test('daemon run mode (supervised) is persisted on pair and heartbeat', async () => {
   const calls = installPoolMock(({ sql }) => {
-    if (/SELECT id, company_id FROM computers/.test(sql)) {
+    if (/SELECT id, company_id/.test(sql)) {
       return { rows: [{ id: 'comp-old', company_id: 'co-1' }] }
     }
     if (/UPDATE computers\s+SET credential_hash/.test(sql)) return { rowCount: 1 }

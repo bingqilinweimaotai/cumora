@@ -319,14 +319,19 @@ export async function pairComputer(args: {
   const reportedName = (args.hostName ?? '').slice(0, 80)
   const name = reportedName || 'My computer'
 
-  const exact = await pool.query<{ id: string; company_id: string }>(
-    `SELECT id, company_id FROM computers
+  const exact = await pool.query<{ id: string; company_id: string; available_engines: string[] }>(
+    `SELECT id, company_id, available_engines FROM computers
       WHERE pair_token = $1 AND kind <> 'cloud' AND revoked_at IS NULL
       LIMIT 1`,
     [args.code],
   )
   if (exact.rows[0]) {
-    const { id, company_id: companyId } = exact.rows[0]
+    const { id, company_id: companyId, available_engines: currentEngines } = exact.rows[0]
+    // A reconnect is an inventory refresh, not a default-engine change. Keep
+    // the existing default first while it is still installed; if it vanished,
+    // mergeDetectedEngines naturally falls back to the daemon's scan order.
+    const orderedEngines = mergeDetectedEngines(currentEngines ?? [], engines) ?? (currentEngines ?? [])
+    const reconnectDetectedJson = JSON.stringify(sanitizeDetectedEngines(args.detected, orderedEngines))
     await pool.query(
       `UPDATE computers
           SET credential_hash = $1, available_engines = $2::jsonb,
@@ -336,7 +341,7 @@ export async function pairComputer(args: {
               detected_engines = $7::jsonb, engines_detected_at = NOW(), detect_requested_at = NULL,
               status = 'online', last_seen_at = NOW(), paired_at = NOW()
         WHERE id = $4`,
-      [hashToken(deviceToken), JSON.stringify(engines), reportedName, id, version, supervised, detectedJson],
+      [hashToken(deviceToken), JSON.stringify(orderedEngines), reportedName, id, version, supervised, reconnectDetectedJson],
     )
     if (!args.deferBroadcast) await broadcastComputerStatus(id, companyId, 'online')
     return { computerId: id, companyId, deviceToken }
