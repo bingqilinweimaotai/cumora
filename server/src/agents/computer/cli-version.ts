@@ -14,6 +14,46 @@
 import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 
+interface CommandInvocation {
+  command: string
+  args: string[]
+  windowsVerbatimArguments?: boolean
+}
+
+/** npm on Windows installs an extensionless POSIX shim before the runnable
+ * `.cmd` shim in `where` output. CreateProcess cannot execute either file
+ * directly, so select the sibling batch shim and invoke it through ComSpec. */
+export function versionCommandInvocation(
+  command: string,
+  args: string[],
+  platform = process.platform,
+  comspec = process.env.ComSpec || 'cmd.exe',
+): CommandInvocation {
+  if (platform !== 'win32') return { command, args }
+
+  let runnable = command
+  if (!/\.(?:cmd|bat|com|exe)$/i.test(runnable)) {
+    for (const ext of ['.cmd', '.bat', '.exe', '.com']) {
+      if (fs.existsSync(`${command}${ext}`)) {
+        runnable = `${command}${ext}`
+        break
+      }
+    }
+  }
+  if (!/\.(?:cmd|bat)$/i.test(runnable)) return { command: runnable, args }
+
+  const commandArgs = args.map((arg) => {
+    const value = String(arg)
+    return /^[\w./:=+-]+$/u.test(value) ? value : `"${value.replace(/"/g, '""')}"`
+  })
+  const commandLine = `""${runnable}"${commandArgs.length ? ` ${commandArgs.join(' ')}` : ''}"`
+  return {
+    command: comspec,
+    args: ['/d', '/s', '/c', commandLine],
+    windowsVerbatimArguments: true,
+  }
+}
+
 /** How to ask an engine its version, and how to find out what the newest one is. */
 export interface EngineVersionSpec {
   /** Args that make the binary print its version (`--version` for all but hermes). */
@@ -176,7 +216,12 @@ function spawnText(cmd: string, args: string[], timeoutMs: number): Promise<stri
     let settled = false
     let child: ReturnType<typeof spawn>
     try {
-      child = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'] })
+      const invocation = versionCommandInvocation(cmd, args)
+      child = spawn(invocation.command, invocation.args, {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true,
+        windowsVerbatimArguments: invocation.windowsVerbatimArguments === true,
+      })
     } catch {
       resolve('')
       return

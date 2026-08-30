@@ -10,13 +10,16 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 process.env.CUMORA_RUNTIME_CLIENT = 'http'
 process.env.OPENAI_API_KEY ??= 'test-key'
 
 const {
   parseCliVersion, isCliOutdated, inferUpdateCommand,
-  parseCursorAbout, parseGrokCheck, ENGINE_VERSION_SPECS,
+  parseCursorAbout, parseGrokCheck, ENGINE_VERSION_SPECS, versionCommandInvocation,
 } = await import('../agents/computer/cli-version.js')
 const { sanitizeDetectedEngines } = await import('../agents/computer/registry.js')
 
@@ -30,6 +33,23 @@ test('parseCliVersion reads the shapes real CLIs print', () => {
   assert.equal(parseCliVersion('no version here'), null)
   assert.equal(parseCliVersion(''), null)
   assert.equal(parseCliVersion(null), null)
+})
+
+test('Windows version probe replaces an extensionless npm shim with its runnable .cmd sibling', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'cumora-engine-version-'))
+  try {
+    const shim = join(root, 'codex')
+    await writeFile(shim, '#!/bin/sh\n')
+    await writeFile(`${shim}.cmd`, '@echo off\r\necho codex-cli 0.15.1\r\n')
+    const comspec = String.raw`C:\Windows\System32\cmd.exe`
+    assert.deepEqual(versionCommandInvocation(shim, ['--version'], 'win32', comspec), {
+      command: comspec,
+      args: ['/d', '/s', '/c', `""${shim}.cmd" --version"`],
+      windowsVerbatimArguments: true,
+    })
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
 })
 
 test('isCliOutdated only fires when upstream is strictly newer', () => {
