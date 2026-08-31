@@ -166,10 +166,18 @@ export function AgentEditor({ agent, onClose, onSaved }: Props) {
     else if (!isFreeTier && cloud) { setComputerId(cloud.id); setEngineChoice(INHERIT_ENGINE) }
   }, [cloud, firstByoa, computerId, isFreeTier])
 
+  // Model ids belong to the selected local engine/account. Do not carry a pin
+  // across a host or engine switch where the new CLI may reject it.
+  const clearModelPins = (): void => {
+    setModel('')
+    setFastModel('')
+  }
+
   const changeComputer = (id: string): void => {
     engineTouched.current = true
     setComputerId(id)
     setEngineChoice(INHERIT_ENGINE)
+    clearModelPins()
   }
 
   // Esc to close
@@ -409,7 +417,11 @@ export function AgentEditor({ agent, onClose, onSaved }: Props) {
                 <Select
                   ariaLabel={t('agent.engineLabel')}
                   value={engineChoice}
-                  onValueChange={(value) => { engineTouched.current = true; setEngineChoice(value) }}
+                  onValueChange={(value) => {
+                    engineTouched.current = true
+                    setEngineChoice(value)
+                    clearModelPins()
+                  }}
                   options={(() => {
                     const advertised = selectedComputer.availableEngines.length
                       ? selectedComputer.availableEngines

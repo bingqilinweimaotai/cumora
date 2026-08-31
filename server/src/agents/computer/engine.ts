@@ -526,13 +526,12 @@ export interface EngineClassifyResult {
   model?: string | null
 }
 
-/** A `doctor` liveness probe for ONE brain tier of an engine: spawn it on the
- *  big (default reasoning) model or the small (cheap fast) model with a one-token
- *  prompt. Verifies the binary runs AND its auth/quota is good for that tier,
- *  without doing any real work. Reuses the same one-shot spawn path as triage. */
+/** A `doctor` liveness probe for ONE brain tier of an engine. Doctor has no
+ *  agent/DB context, so its small tier checks only the computer-level fallback,
+ *  not a member-specific fastModel pin. */
 export interface EngineProbeArgs {
-  /** 'big' → engine default model (main brain); 'small' → cheap fast model (the
-   *  cerebellum, e.g. Claude haiku) — the SAME model triage runs on. */
+  /** 'big' → engine default model; 'small' → computer-level cheap/fast
+   *  fallback. Member-specific pins are validated only during real triage. */
   tier: 'big' | 'small'
   /** Neutral temp cwd (no persona). */
   cwd: string
@@ -1050,9 +1049,7 @@ function spawnCapture(
   })
 }
 
-/** The small/fast model the triage path actually runs on. `probe` must use the
- *  SAME one or `doctor` reports a red small-brain for an operator whose custom
- *  provider has no `haiku` — even though their triage is configured correctly. */
+/** The computer-level small/fast model used by standalone probes. */
 function triageModel(fallback: string): string {
   return process.env.CUMORA_TRIAGE_MODEL?.trim() || fallback
 }
