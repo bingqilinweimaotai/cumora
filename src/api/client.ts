@@ -2,7 +2,7 @@ import type {
   Message, Status,
   BoardSummary, BoardSnapshot, BoardCardComment, BoardCardLookup,
   CalendarEvent, CalendarEventKind, CalendarEventStatus, CalendarDispatch, RecurrenceRule,
-  CalendarReminderChannel,ComputerStatus, ComputerKind, EngineId,
+  CalendarReminderChannel,ComputerStatus, ComputerKind, EngineId, DetectedEngine,
 } from '@/types'
 import { getAuthToken, getActiveCompanyId, useAuth } from '@/stores/auth'
 
@@ -236,7 +236,7 @@ export interface ApiComputer {
   name: string
   kind: ComputerKind
   available_engines: EngineId[]
-  detected_engines?: Array<{ id: EngineId; bin: string; path: string | null }>
+  detected_engines?: DetectedEngine[]
   engines_detected_at?: string | null
   status: ComputerStatus
   last_seen_at: string | null

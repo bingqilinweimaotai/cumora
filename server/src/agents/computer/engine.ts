@@ -31,6 +31,7 @@ import { basename, dirname, join, delimiter as PATH_DELIMITER } from 'node:path'
 import { StringDecoder } from 'node:string_decoder'
 import { stripLoneSurrogates } from '../text-safety.js'
 import { isCliVersionAtLeast, probeEngineVersion, probeLocalEngineVersion } from './cli-version.js'
+import { discoverEngineModelCatalog, type EngineModelCatalog } from './model-catalog.js'
 
 const IS_WIN = process.platform === 'win32'
 
@@ -5130,6 +5131,9 @@ export interface DetectedEngineSnapshot {
   /** Why this installed engine will NOT be driven — the reason
    *  evaluateRunnableEngines() produced. Absent on runnable engines. */
   blockedReason?: string
+  /** Account/config-specific model choices discovered by the daemon that owns
+   * this CLI login. Absent on the cheap pairing snapshot and older daemons. */
+  modelCatalog?: EngineModelCatalog
 }
 
 /** Snapshot the installed engines, optionally in a caller-supplied order
@@ -5151,11 +5155,15 @@ export async function snapshotDetectedEngines(ids?: EngineId[]): Promise<Detecte
  *  sitting and waiting on. */
 export async function enrichDetectedEngines(
   snapshot: DetectedEngineSnapshot[],
+  refreshModelCatalog = false,
 ): Promise<DetectedEngineSnapshot[]> {
-  return Promise.all(snapshot.map(async (entry) => ({
-    ...entry,
-    ...await probeEngineVersion(entry.id, entry.path),
-  })))
+  return Promise.all(snapshot.map(async (entry) => {
+    const [version, modelCatalog] = await Promise.all([
+      probeEngineVersion(entry.id, entry.path),
+      discoverEngineModelCatalog(entry.id, entry.path, refreshModelCatalog),
+    ])
+    return { ...entry, ...version, modelCatalog }
+  }))
 }
 
 /** Resolve a bin's absolute path on PATH (the first hit), or null if absent. */

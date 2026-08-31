@@ -8,6 +8,7 @@ import { useAuth } from '@/stores/auth'
 import { Input } from '@/components/Input'
 import { TextArea } from '@/components/TextArea'
 import { Select } from '@/components/Select'
+import { Combobox, type ComboboxOption } from '@/components/Combobox'
 import type { Participant, EngineId } from '@/types'
 import { useT } from '@/lib/i18n'
 import { engineLabel } from '@/lib/engines'
@@ -93,6 +94,39 @@ export function AgentEditor({ agent, onClose, onSaved }: Props) {
       : (selectedComputer?.availableEngines[0] ?? 'claude')
   ) as EngineId
   const selectedComputerOffline = isByoa && selectedComputer.status !== 'online'
+  const modelCatalog = selectedComputer?.detectedEngines
+    ?.find((engine) => engine.id === selectedEngineId)
+    ?.modelCatalog
+  const modelOptions: Array<ComboboxOption<string>> = [
+    {
+      value: '',
+      label: t('agent.followEngineDefault'),
+      hint: modelCatalog?.defaultModel ?? undefined,
+    },
+    ...(modelCatalog?.models ?? []).map((option) => ({
+      value: option.id,
+      label: option.label,
+      hint: [
+        option.label !== option.id ? option.id : null,
+        option.recommendedFor?.includes('big') ? t('agent.recommended') : null,
+      ].filter(Boolean).join(' · ') || undefined,
+    })),
+  ]
+  const fastModelOptions: Array<ComboboxOption<string>> = [
+    {
+      value: '',
+      label: t('agent.followSmallBrainDefault'),
+      hint: modelCatalog?.defaultFastModel ?? undefined,
+    },
+    ...(modelCatalog?.models ?? []).map((option) => ({
+      value: option.id,
+      label: option.label,
+      hint: [
+        option.label !== option.id ? option.id : null,
+        option.recommendedFor?.includes('small') ? t('agent.recommended') : null,
+      ].filter(Boolean).join(' · ') || undefined,
+    })),
+  ]
   const origin = getPairingServerOrigin()
   const repairCommand = repairCode
     ? `npx cumora@latest agent computer --pair ${repairCode}${origin ? ` --server ${origin}` : ''}`
@@ -303,48 +337,43 @@ export function AgentEditor({ agent, onClose, onSaved }: Props) {
 
           <Field
             label={isByoa ? t('agent.modelLabelByoa') : t('agent.modelLabel')}
-            hint={isByoa
-              ? `${t('agent.modelHintByoaPrefix')} ${selectedEngineId === 'codex' ? t('agent.modelHintByoaCodex') : selectedEngineId === 'grok' ? t('agent.modelHintByoaGrok') : selectedEngineId === 'cursor' ? t('agent.modelHintByoaCursor') : selectedEngineId === 'opencode' ? t('agent.modelHintByoaOpenCode') : selectedEngineId === 'pi' ? t('agent.modelHintByoaPi') : selectedEngineId === 'gemini' ? t('agent.modelHintByoaGemini') : selectedEngineId === 'qwen' ? t('agent.modelHintByoaQwen') : selectedEngineId === 'antigravity' ? t('agent.modelHintByoaAntigravity') : t('agent.modelHintByoaClaude')} ${t('agent.modelHintByoaSuffix')}`
-              : t('agent.modelHintCloud')}
+            hint={isByoa ? t('agent.modelHintByoaCatalog') : t('agent.modelHintCloud')}
           >
-            <Input
-              type="text"
-              value={model}
-              onChange={(e) => setModel(e.target.value)}
-              placeholder={t('agent.defaultPh')}
-              className="font-mono"
-              spellCheck={false}
-            />
-          </Field>
-
-          {isByoa && (
-            <Field
-              label={t('agent.fastLabelByoa')}
-              hint={selectedEngineId === 'codex'
-                ? t('agent.fastHintByoaCodex')
-                : selectedEngineId === 'grok'
-                  ? t('agent.fastHintByoaGrok')
-                  : selectedEngineId === 'cursor'
-                    ? t('agent.fastHintByoaCursor')
-                    : selectedEngineId === 'opencode'
-                      ? t('agent.fastHintByoaOpenCode')
-                      : selectedEngineId === 'pi'
-                        ? t('agent.fastHintByoaPi')
-                        : selectedEngineId === 'gemini'
-                          ? t('agent.fastHintByoaGemini')
-                          : selectedEngineId === 'qwen'
-                            ? t('agent.fastHintByoaQwen')
-                            : selectedEngineId === 'antigravity'
-                              ? t('agent.fastHintByoaAntigravity')
-                        : t('agent.fastHintByoaClaude')}
-            >
+            {isByoa ? (
+              <Combobox
+                ariaLabel={t('agent.modelLabelByoa')}
+                value={model}
+                onValueChange={setModel}
+                options={modelOptions}
+                searchPlaceholder={t('agent.searchModels')}
+                allowCustom={modelCatalog?.supportsCustom !== false}
+                customLabel={(value) => t('agent.useCustomModel', { model: value })}
+              />
+            ) : (
               <Input
                 type="text"
-                value={fastModel}
-                onChange={(e) => setFastModel(e.target.value)}
+                value={model}
+                onChange={(e) => setModel(e.target.value)}
                 placeholder={t('agent.defaultPh')}
                 className="font-mono"
                 spellCheck={false}
+              />
+            )}
+          </Field>
+
+          {isByoa && (!modelCatalog || modelCatalog.fastModelScope === 'agent') && (
+            <Field
+              label={t('agent.fastLabelByoa')}
+              hint={t('agent.fastHintByoaCatalog')}
+            >
+              <Combobox
+                ariaLabel={t('agent.fastLabelByoa')}
+                value={fastModel}
+                onValueChange={setFastModel}
+                options={fastModelOptions}
+                searchPlaceholder={t('agent.searchModels')}
+                allowCustom={modelCatalog?.supportsCustom !== false}
+                customLabel={(value) => t('agent.useCustomModel', { model: value })}
               />
             </Field>
           )}
