@@ -161,3 +161,40 @@ test('assignAgentToComputer pins when an engine is named and inherits when it is
   })
   assert.deepEqual(inherited, { kind: 'local', engine: 'claude', inherit: true })
 })
+
+test('assignAgentToComputer rejects an unavailable explicit pin before mutating the agent', async () => {
+  const calls = installPoolMock(({ sql }) => {
+    if (/SELECT kind, available_engines/.test(sql)) {
+      return { rows: [{ kind: 'local', available_engines: ['claude'] }] }
+    }
+    if (/UPDATE participants SET computer_id/.test(sql)) return { rowCount: 1 }
+    return { rows: [] }
+  })
+  const out = await registry.assignAgentToComputer({
+    agentId: 'bram', companyId: 'co-1', computerId: 'comp-1', engine: 'codex', inherit: false,
+    model: null, fastModel: null,
+  })
+  assert.equal(out, null)
+  assert.equal(calls.some((call) => /UPDATE participants SET computer_id/.test(call.sql)), false)
+})
+
+test('assignAgentToComputer persists model pins in the host assignment update', async () => {
+  const calls = installPoolMock(({ sql }) => {
+    if (/SELECT kind, available_engines/.test(sql)) {
+      return { rows: [{ kind: 'local', available_engines: ['claude', 'codex'] }] }
+    }
+    if (/UPDATE participants SET computer_id/.test(sql)) return { rowCount: 1 }
+    return { rows: [] }
+  })
+  const out = await registry.assignAgentToComputer({
+    agentId: 'bram', companyId: 'co-1', computerId: 'comp-1', engine: 'codex', inherit: false,
+    model: 'gpt-5.6-sol', fastModel: null,
+  })
+  assert.deepEqual(out, { kind: 'local', engine: 'codex', inherit: false })
+  const update = calls.find((call) => /UPDATE participants SET computer_id/.test(call.sql))
+  assert.match(update?.sql ?? '', /model = \$4/)
+  assert.match(update?.sql ?? '', /fast_model = \$5/)
+  assert.deepEqual(update?.params, [
+    'comp-1', 'codex', false, 'gpt-5.6-sol', null, 'bram', 'co-1',
+  ])
+})

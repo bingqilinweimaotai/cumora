@@ -929,14 +929,29 @@ export async function assignAgentToComputer(args: {
   engine?: string
   /** When true (or when no engine is named), follow the computer default. */
   inherit?: boolean
+  /** Optional model pins to persist in the same participant UPDATE as the
+   *  host/engine assignment. undefined leaves the value untouched; null clears it. */
+  model?: string | null
+  fastModel?: string | null
 }): Promise<{ kind: ComputerKind; engine: EngineId; inherit: boolean } | null> {
-  const placement = await resolveComputerAssignment(args)
+  const placement = await resolveComputerAssignment({ ...args, strictEngine: true })
   if (!placement) return null
 
+  const sets = ['computer_id = $1', 'engine = $2', 'engine_inherit = $3']
+  const params: unknown[] = [args.computerId, placement.engine, placement.inherit]
+  if (args.model !== undefined) {
+    params.push(args.model)
+    sets.push(`model = $${params.length}`)
+  }
+  if (args.fastModel !== undefined) {
+    params.push(args.fastModel)
+    sets.push(`fast_model = $${params.length}`)
+  }
+  params.push(args.agentId, args.companyId)
   const { rowCount } = await pool.query(
-    `UPDATE participants SET computer_id = $1, engine = $2, engine_inherit = $3
-      WHERE id = $4 AND company_id = $5 AND kind = 'agent'`,
-    [args.computerId, placement.engine, placement.inherit, args.agentId, args.companyId],
+    `UPDATE participants SET ${sets.join(', ')}
+      WHERE id = $${params.length - 1} AND company_id = $${params.length} AND kind = 'agent'`,
+    params,
   )
   if (!rowCount) return null
   return placement

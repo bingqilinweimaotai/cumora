@@ -174,6 +174,7 @@ export function AgentEditor({ agent, onClose, onSaved }: Props) {
   }
 
   const changeComputer = (id: string): void => {
+    if (id === computerId) return
     engineTouched.current = true
     setComputerId(id)
     setEngineChoice(INHERIT_ENGINE)
@@ -197,16 +198,25 @@ export function AgentEditor({ agent, onClose, onSaved }: Props) {
       const isByoaTarget = !!targetComputer && targetComputer.kind !== 'cloud'
       const inherit = engineChoice === INHERIT_ENGINE
       const pinned = inherit ? undefined : (engineChoice as EngineId)
+      const savedChoice = initialEngineChoice(agent, targetComputer)
+      const inheritChanged = isByoaTarget && inherit !== (savedChoice === INHERIT_ENGINE)
+      const engineChanged = isByoaTarget && !inherit && pinned !== ((agent?.engine as EngineId) ?? null)
+      const assignmentChanged = Boolean(target && (target !== current || inheritChanged || engineChanged))
       const payload: AgentInput = {
         name, role, systemPrompt, bio, avatarBg,
         model: model.trim() || null,
         fastModel: fastModel.trim() || null,
       }
+      // A host/engine change persists these pins in the assignment's single
+      // SQL UPDATE. Do not clear them earlier if that assignment may fail.
+      const profilePayload = assignmentChanged
+        ? { ...payload, model: undefined, fastModel: undefined }
+        : payload
       let agentId = agent?.id
       if (editing) {
         // Only send avatarUrl on change so we don't clobber it on no-op edits.
-        if ((agent!.avatarUrl ?? null) !== avatarUrl) payload.avatarUrl = avatarUrl
-        await api.updateAgent(agent!.id, payload)
+        if ((agent!.avatarUrl ?? null) !== avatarUrl) profilePayload.avatarUrl = avatarUrl
+        await api.updateAgent(agent!.id, profilePayload)
       } else {
         // Creation + initial host/engine assignment is one transaction. The
         // stable request id makes retry-after-timeout return that same Agent.
@@ -226,11 +236,15 @@ export function AgentEditor({ agent, onClose, onSaved }: Props) {
       // (Engine lives in the same assign call; gating only on the computer
       // would silently drop a Claude→Codex switch on the same machine.) Still
       // skipped on a plain style edit to avoid the owner/admin-gated call.
-      const savedChoice = initialEngineChoice(agent, targetComputer)
-      const inheritChanged = isByoaTarget && inherit !== (savedChoice === INHERIT_ENGINE)
-      const engineChanged = isByoaTarget && !inherit && pinned !== ((agent?.engine as EngineId) ?? null)
-      if (editing && agentId && target && (target !== current || inheritChanged || engineChanged)) {
-        const out = await api.assignAgentComputer(agentId, target, isByoaTarget ? pinned : undefined, isByoaTarget ? inherit : false)
+      if (editing && agentId && target && assignmentChanged) {
+        const out = await api.assignAgentComputer(
+          agentId,
+          target,
+          isByoaTarget ? pinned : undefined,
+          isByoaTarget ? inherit : false,
+          model.trim() || null,
+          fastModel.trim() || null,
+        )
         if (isByoaTarget && pinned && out.engine !== pinned) {
           throw new Error(t('agent.enginePinRejected', { engine: engineLabel(pinned) }))
         }
@@ -418,6 +432,7 @@ export function AgentEditor({ agent, onClose, onSaved }: Props) {
                   ariaLabel={t('agent.engineLabel')}
                   value={engineChoice}
                   onValueChange={(value) => {
+                    if (value === engineChoice) return
                     engineTouched.current = true
                     setEngineChoice(value)
                     clearModelPins()

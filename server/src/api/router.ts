@@ -1212,8 +1212,10 @@ api.post('/agents/:id/computer', safe(async (req, res) => {
   }
   const engine = typeof req.body?.engine === 'string' ? req.body.engine : undefined
   const inherit = req.body?.inherit === true
+  const modelPins = readAgentBody(req.body ?? {})
   const out = await assignAgentToComputer({
     agentId: String(req.params.id), companyId, computerId, engine, inherit: inherit || !engine,
+    model: modelPins.model, fastModel: modelPins.fastModel,
   })
   if (!out) throw new HttpError(400, 'invalid computer, agent, or engine for this company')
   res.json({ ok: true, ...out })
