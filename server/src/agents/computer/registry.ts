@@ -413,26 +413,28 @@ export async function heartbeatComputer(
   version?: string,
   supervised?: boolean,
   detectedEngines?: string[],
-): Promise<void> {
+): Promise<boolean> {
   const v = typeof version === 'string' && version ? version.slice(0, 32) : null
   const sup = typeof supervised === 'boolean' ? supervised : null
   // Liveness is the primary heartbeat contract. Refreshing the optional PATH
   // inventory must not run first: one transient read failure used to reject the
   // whole request, so a healthy daemon could be swept offline even though its
   // heartbeat reached the server.
-  const bumped = await pool.query(
+  const bumped = await pool.query<{ detect_requested_at: string | null }>(
     `UPDATE computers SET last_seen_at = NOW(), daemon_version = COALESCE($2, daemon_version),
             daemon_supervised = COALESCE($3, daemon_supervised)
-      WHERE id = $1 AND revoked_at IS NULL AND status = 'online' RETURNING 1`,
+      WHERE id = $1 AND revoked_at IS NULL AND status = 'online' RETURNING detect_requested_at`,
     [computerId, v, sup],
   )
+  let detectRequested = Boolean(bumped.rows[0]?.detect_requested_at)
   if (!bumped.rowCount) {
-    const { rows } = await pool.query<{ company_id: string }>(
+    const { rows } = await pool.query<{ company_id: string; detect_requested_at: string | null }>(
       `UPDATE computers SET status = 'online', last_seen_at = NOW(), daemon_version = COALESCE($2, daemon_version),
               daemon_supervised = COALESCE($3, daemon_supervised)
-        WHERE id = $1 AND revoked_at IS NULL RETURNING company_id`,
+        WHERE id = $1 AND revoked_at IS NULL RETURNING company_id, detect_requested_at`,
       [computerId, v, sup],
     )
+    detectRequested = Boolean(rows[0]?.detect_requested_at)
     if (rows[0]) await broadcastComputerStatus(computerId, rows[0].company_id, 'online')
   }
 
@@ -460,6 +462,7 @@ export async function heartbeatComputer(
       console.warn('[computers] heartbeat engine refresh failed:', err instanceof Error ? err.message : err)
     }
   }
+  return detectRequested
 }
 
 /** Mark paired computers offline once their heartbeat goes stale, and

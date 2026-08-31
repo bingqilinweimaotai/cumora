@@ -1292,6 +1292,7 @@ export const zhCN: Partial<Record<keyof typeof en, string>> = {
   'me.agentsCliDetectedOther': '{n} 个引擎已被检测',
   'me.agentsRefresh': '刷新',
   'me.agentsRefreshing': '刷新中…',
+  'me.agentsRefreshTimedOut': '引擎刷新超时，请确认该计算机的守护进程在线后重试。',
   'me.agentsIsDefault': '默认',
   'me.agentsOffline': '这台计算机离线。列表仍是上次配对时的检测结果。',
   'me.agentsNoEngines': '配对时 daemon 没有报任何引擎。要重新扫 PATH，请在那台机器上再跑一次配对命令。',

@@ -1290,6 +1290,7 @@ export const en = {
   'me.agentsCliDetectedOther': '{n} engines detected',
   'me.agentsRefresh': 'Refresh',
   'me.agentsRefreshing': 'Refreshing…',
+  'me.agentsRefreshTimedOut': 'Engine refresh timed out. Make sure the computer daemon is online and try again.',
   'me.agentsIsDefault': 'Default',
   'me.agentsOffline': 'This computer is offline. The list is still the last pairing report.',
   'me.agentsNoEngines': 'The daemon reported no engines at pairing. Re-run the pairing command on that computer to scan PATH again.',

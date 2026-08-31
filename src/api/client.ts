@@ -939,6 +939,10 @@ export const api = {
   repairComputer: (id: string) =>
     http<{ code: string; expiresInSeconds: number | null }>(
       `/computers/${encodeURIComponent(id)}/repair`, { method: 'POST', body: '{}' }),
+  /** Ask a paired computer to re-probe its local engine inventory + versions. */
+  requestComputerEngineDetect: (id: string) =>
+    http<{ ok: boolean }>(
+      `/computers/${encodeURIComponent(id)}/detect`, { method: 'POST', body: '{}' }),
   /** Move an agent to a computer, choosing its engine (Cumora Cloud = managed). */
   assignAgentComputer: (agentId: string, computerId: string, engine?: EngineId, inherit?: boolean) =>
     http<{ ok: boolean; kind: ComputerKind; engine: EngineId; inherit?: boolean }>(

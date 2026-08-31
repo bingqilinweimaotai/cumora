@@ -1280,8 +1280,8 @@ api.post('/computers/heartbeat', safe(async (req, res) => {
   const engines = Array.isArray(req.body?.engines)
     ? (req.body.engines as unknown[]).filter((e): e is string => typeof e === 'string')
     : undefined
-  await heartbeatComputer(computerId, version, supervised, engines)
-  res.json({ ok: true })
+  const detectRequested = await heartbeatComputer(computerId, version, supervised, engines)
+  res.json({ ok: true, detectRequested })
 }))
 
 // Mint a per-agent runtime JWT for the calling computer (daemon refresh loop).

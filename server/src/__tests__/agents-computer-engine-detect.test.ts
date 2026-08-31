@@ -116,14 +116,24 @@ test('setComputerDefaultEngine reorders engines and only moves inheriting agents
   }
 })
 
-test('heartbeatComputer is quiet when the computer is already online', async () => {
+test('heartbeatComputer returns a pending engine detection request', async () => {
   installPoolMock(({ sql }) => {
     if (/AND status = 'online'/.test(sql)) {
-      return { rows: [{}], rowCount: 1 }
+      return { rows: [{ detect_requested_at: '2026-08-31T00:00:00.000Z' }], rowCount: 1 }
     }
     return { rows: [] }
   })
-  await registry.heartbeatComputer('comp-1', '0.5.0', true)
+  assert.equal(await registry.heartbeatComputer('comp-1', '0.5.0', true), true)
+})
+
+test('heartbeatComputer stays quiet without an engine detection request', async () => {
+  installPoolMock(({ sql }) => {
+    if (/AND status = 'online'/.test(sql)) {
+      return { rows: [{ detect_requested_at: null }], rowCount: 1 }
+    }
+    return { rows: [] }
+  })
+  assert.equal(await registry.heartbeatComputer('comp-1', '0.5.0', true), false)
 })
 
 test('assignAgentToComputer pins when an engine is named and inherits when it is not', async () => {

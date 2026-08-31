@@ -920,7 +920,20 @@ function ComputersTab() {
     setErr(null)
     setBusyId(id)
     try {
-      await useComputers.getState().refresh()
+      const before = useComputers.getState().byId[id]?.enginesDetectedAt ?? null
+      await api.requestComputerEngineDetect(id)
+
+      // A paired daemon receives the request on its next heartbeat and then
+      // reports a fresh snapshot. Keep the button busy until that report lands,
+      // instead of presenting a cached GET as a completed engine refresh.
+      const deadline = Date.now() + 50_000
+      while (Date.now() < deadline) {
+        await new Promise((resolve) => window.setTimeout(resolve, 750))
+        await useComputers.getState().refresh()
+        const after = useComputers.getState().byId[id]?.enginesDetectedAt ?? null
+        if (after && after !== before) return
+      }
+      throw new Error(t('me.agentsRefreshTimedOut'))
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e))
     } finally {

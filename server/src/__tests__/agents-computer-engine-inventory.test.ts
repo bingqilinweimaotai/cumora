@@ -7,6 +7,7 @@ import assert from 'node:assert/strict'
 import {
   replaceEngineInventory,
   resolveAvailableEngine,
+  shouldReportEngineSnapshot,
   type EngineInventory,
 } from '../agents/computer/daemon.js'
 
@@ -31,4 +32,11 @@ test('an unchanged scan does not replace the shared inventory', () => {
 
   assert.equal(replaceEngineInventory(inventory, current), false)
   assert.equal(inventory.current, before)
+})
+
+test('a requested refresh reports an unchanged engine snapshot', () => {
+  const snapshot = JSON.stringify([{ id: 'codex', version: '1.2.3' }])
+
+  assert.equal(shouldReportEngineSnapshot(snapshot, snapshot), false)
+  assert.equal(shouldReportEngineSnapshot(snapshot, snapshot, true), true)
 })

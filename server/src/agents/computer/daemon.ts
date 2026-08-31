@@ -773,6 +773,12 @@ export function replaceEngineInventory(inventory: EngineInventory, next: readonl
   return changed
 }
 
+/** A user-requested refresh must report even an unchanged snapshot so the
+ * server can clear the pending request and the UI can observe completion. */
+export function shouldReportEngineSnapshot(fingerprint: string, previous: string, force = false): boolean {
+  return force || fingerprint !== previous
+}
+
 // ─── config ─────────────────────────────────────────────────────────────
 
 async function loadConfig(): Promise<DaemonConfig | null> {
@@ -3068,7 +3074,7 @@ async function doRun(serverOverride?: string): Promise<void> {
   // on every heartbeat so installing another supported CLI takes effect without
   // re-pairing — the daemon is already online and can see PATH itself, so there
   // is no reason to make the user mint a new pairing token for it.
-  const rescanEngines = async (): Promise<void> => {
+  const scanEnginesOnce = async (forceReport: boolean): Promise<void> => {
     try {
       const detected = await detectEnginesWithStatus()
       if (!detected.reliable) return  // broken `which` / `where` — keep the last good list
@@ -3095,7 +3101,7 @@ async function doRun(serverOverride?: string): Promise<void> {
       // engine in place leaves the engine *list* identical, and that is exactly
       // when the card's version line goes stale.
       const fingerprint = JSON.stringify(snapshot)
-      if (fingerprint !== lastEngineSnapshot) {
+      if (shouldReportEngineSnapshot(fingerprint, lastEngineSnapshot, forceReport)) {
         lastEngineSnapshot = fingerprint
         await api(cfg.serverUrl, '/api/computers/me/engines', {
           method: 'POST',
@@ -3111,9 +3117,32 @@ async function doRun(serverOverride?: string): Promise<void> {
     } catch { /* transient — the next tick retries */ }
   }
 
+  // Timer/startup/requested scans can land together. Share an in-flight scan;
+  // if a forced request arrives during it, run once more so its acknowledgement
+  // cannot be swallowed by the older scan finishing afterward.
+  let rescanInFlight: Promise<void> | null = null
+  let forcedRescanPending = false
+  const rescanEngines = (forceReport = false): Promise<void> => {
+    forcedRescanPending ||= forceReport
+    if (rescanInFlight) return rescanInFlight
+    const running = (async () => {
+      let first = true
+      while (first || forcedRescanPending) {
+        first = false
+        const force = forcedRescanPending
+        forcedRescanPending = false
+        await scanEnginesOnce(force)
+      }
+    })().finally(() => {
+      if (rescanInFlight === running) rescanInFlight = null
+    })
+    rescanInFlight = running
+    return running
+  }
+
   const heartbeat = async (): Promise<void> => {
     try {
-      await fetch(`${cfg.serverUrl}/api/computers/heartbeat`, {
+      const response = await fetch(`${cfg.serverUrl}/api/computers/heartbeat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.deviceToken}` },
         // A heartbeat that never answers must not outlive its own interval, or
@@ -3124,6 +3153,9 @@ async function doRun(serverOverride?: string): Promise<void> {
         // update instructions for this machine.
         body: JSON.stringify({ version: CURRENT_VERSION, supervised: SUPERVISED, engines: engineInventory.current }),
       })
+      if (!response.ok) return
+      const heartbeatResult = await response.json().catch(() => null) as { detectRequested?: boolean } | null
+      if (heartbeatResult?.detectRequested) void rescanEngines(true)
     } catch { /* transient — next tick retries */ }
   }
 
