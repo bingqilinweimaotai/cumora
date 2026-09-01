@@ -1,10 +1,6 @@
 name: Production readback
 
 on:
-  schedule:
-    # Independent daily readback. Feature-specific T+24 deadlines are tracked
-    # by shipping_releases; the server promotes missed ones to overdue friction.
-    - cron: '17 3 * * *'
   workflow_dispatch:
 
 permissions:
