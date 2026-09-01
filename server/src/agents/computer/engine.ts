@@ -1615,6 +1615,9 @@ type CodexRpcMsg = {
 
 const CODEX_SECURE_CONFIG_ARGS = [
   '--strict-config',
+  // The unelevated restricted-token sandbox cannot enforce Cumora's split
+  // filesystem profile. Native Windows uses Codex's elevated sandbox instead.
+  ...(IS_WIN ? ['-c', 'windows.sandbox="elevated"'] : []),
   '-c', 'default_permissions="cumora"',
   '-c', 'permissions.cumora.network.enabled=false',
   '-c', 'shell_environment_policy.inherit="none"',

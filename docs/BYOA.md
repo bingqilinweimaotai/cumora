@@ -264,9 +264,11 @@ fail-closed host boundary:
 - Codex runs one-shot with user config and exec-policy rules ignored. A custom
   permission profile permits minimal runtime reads and writes only under the
   agent home, disables command network, and gives model-spawned commands only
-  an explicit non-secret environment. The agent home is marked untrusted at
-  CLI precedence, and hooks, apps, remote plugins, multi-agent tools, web
-  search, and shell snapshots are disabled. Codex 0.138.0 or newer is required.
+  an explicit non-secret environment. Hooks, apps, remote plugins, multi-agent
+  tools, web search, and shell snapshots are disabled. Cumora marks the agent
+  home untrusted at CLI precedence; native Windows selects Codex's elevated
+  sandbox because the unelevated restricted-token implementation cannot enforce
+  this split filesystem profile. Codex 0.138.0 or newer is required.
 
 Grok, Cursor, OpenCode, pi, Gemini, and Claude on native Windows remain
 available only as a backwards-compatibility escape hatch. They are not merely

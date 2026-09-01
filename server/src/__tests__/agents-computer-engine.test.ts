@@ -399,6 +399,7 @@ test('Codex one-shot paths send prompts through stdin', async () => {
   const runCapture = JSON.parse(logs.at(-1) ?? '{}') as { argv?: string[]; stdin?: string }
   assert.ok(runCapture.argv?.includes('default_permissions="cumora"'))
   assert.ok(runCapture.argv?.includes('permissions.cumora.network.enabled=false'))
+  if (IS_WIN) assert.ok(runCapture.argv?.includes('windows.sandbox="elevated"'))
   assert.ok(runCapture.argv?.includes('shell_environment_policy.inherit="none"'))
   assert.equal(runCapture.argv?.some((arg) => arg.includes(`${join(root, 'private-ipc', 'requests')}"="write`)), false)
   assert.equal(runCapture.argv?.some((arg) => arg.includes(`${join(root, 'private-ipc', 'responses')}"="write`)), false)
