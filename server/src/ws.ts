@@ -1,27 +1,27 @@
-import { WebSocketServer, type WebSocket } from 'ws'
+import { randomUUID } from 'node:crypto'
 import type { Server } from 'node:http'
-import {
-  sub,
-  CH_MESSAGE_NEW, CH_MESSAGE_DELTA, CH_TYPING,
-  CH_STATUS, CH_REACTIONS, CH_POLLS,
-  CH_GROUP_PULLED, CH_CONVO_UPDATED, CH_CONVENE,
-  CH_BOARDS, CH_DOCS, CH_CALENDAR_REMINDER, CH_CALENDAR_EVENTS, CH_DOC_MENTION,
-  publish,
-  type DocMentionEvent,
-} from './redis.js'
-import type { MessageNewEvent } from './redis.js'
-import { env } from './env.js'
+import { type WebSocket, WebSocketServer } from 'ws'
 import { consumeWsTicket } from './auth.js'
 import { pool } from './db/pool.js'
-import { setStatus } from './status.js'
 import {
-  subscribe as docSubscribe,
-  unsubscribe as docUnsubscribe,
+  type DocSubscriber,
   applyLocalUpdate as docApplyLocalUpdate,
   broadcastAwareness as docBroadcastAwareness,
-  type DocSubscriber,
+  subscribe as docSubscribe,
+  unsubscribe as docUnsubscribe,
 } from './documents/rooms.js'
-import { randomUUID } from 'node:crypto'
+import { env } from './env.js'
+import type { MessageNewEvent } from './redis.js'
+import {
+  CH_BOARDS, CH_CALENDAR_EVENTS, CH_CALENDAR_REMINDER, CH_CONVENE,
+  CH_CONVO_UPDATED, CH_DOC_MENTION, CH_DOCS, CH_GROUP_PULLED,
+  CH_MESSAGE_DELTA, CH_MESSAGE_NEW, CH_POLLS, CH_REACTIONS,
+  CH_STATUS, CH_TYPING, CH_WORKSPACES,
+  type DocMentionEvent,
+  publish,
+  sub,
+} from './redis.js'
+import { setStatus } from './status.js'
 
 interface AuthedSocket {
   ws: WebSocket
@@ -161,6 +161,19 @@ export async function resolveWsEventRecipientUserIds(
 ): Promise<Set<string>> {
   const companyId = typeof event.companyId === 'string' ? event.companyId : ''
   if (!companyId) return new Set()
+  // Membership invalidations are terminal, user-targeted frames. Looking the
+  // recipients up through company_members would drop the exact event that tells
+  // a removed user to evict the workspace from their client. The publisher is a
+  // server-only mutation path and users are still checked for account liveness.
+  if (event.type === 'workspace.membership') {
+    const requested = [...new Set((event.recipientUserIds ?? []).filter((id) => typeof id === 'string'))]
+    if (requested.length === 0) return new Set()
+    const { rows } = await pool.query<{ id: string }>(
+      `SELECT id FROM users WHERE id = ANY($1::text[]) AND deleted_at IS NULL`,
+      [requested],
+    )
+    return new Set(rows.map((row) => row.id))
+  }
   const targetedUserIds = event.type === 'doc.mention'
     ? event.mentionedIds
     : event.type === 'calendar.reminder'
@@ -891,7 +904,7 @@ export function attachWebSocket(httpServer: Server) {
     CH_MESSAGE_NEW, CH_MESSAGE_DELTA, CH_TYPING,
     CH_STATUS, CH_REACTIONS, CH_POLLS,
     CH_GROUP_PULLED, CH_CONVO_UPDATED, CH_CONVENE,
-    CH_BOARDS, CH_DOCS, CH_CALENDAR_REMINDER, CH_CALENDAR_EVENTS, CH_DOC_MENTION,
+    CH_BOARDS, CH_DOCS, CH_CALENDAR_REMINDER, CH_CALENDAR_EVENTS, CH_DOC_MENTION, CH_WORKSPACES,
   ).then((count) => {
     console.log(`[ws] subscribed to ${count} redis channels`)
   })

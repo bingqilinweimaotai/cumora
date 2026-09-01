@@ -1,31 +1,33 @@
 import { useEffect, useRef, useState } from 'react'
-import { useIsMobile } from '@/lib/utils'
-import { useApp } from '@/stores/app'
-import { useAuth } from '@/stores/auth'
-import { useMessages, bootMessagesStream } from '@/stores/messages'
-import { bootParticipants, useParticipants } from '@/stores/participants'
-import { bootConversations, isMuted, useConversations } from '@/stores/conversations'
-import { bootWhispers, useWhispers } from '@/stores/whispers'
-import { bootComputers, useComputers } from '@/stores/computers'
-import { Onboarding } from '@/desktop/Onboarding'
-import { usePrefs } from '@/stores/preferences'
+import { AdminApp } from '@/admin/AdminApp'
+import { consumeSuspendedFragment, SuspendedScreen } from '@/admin/SuspendedScreen'
+import { consumeWaitlistFragment, WaitlistConfirmedScreen } from '@/admin/WaitlistConfirmedScreen'
 import { api } from '@/api/client'
-import { DesktopApp } from '@/desktop/DesktopApp'
-import { MobileApp } from '@/mobile/MobileApp'
 import { AuthGate } from '@/components/AuthGate'
+import { ErrorBoundary } from '@/components/ErrorBoundary'
+import {
+  clearPendingInvite, consumeInviteFromUrl, getPendingInvite,
+  InviteAcceptScreen,
+} from '@/components/InviteAcceptScreen'
 import { NotificationToasts } from '@/components/NotificationToasts'
 import { NotificationWindow } from '@/components/NotificationWindow'
-import { ErrorBoundary } from '@/components/ErrorBoundary'
-import { isNotificationWindow, isWebAppHost } from '@/lib/runtime'
-import { WebShell } from '@/web/WebShell'
-import {
-  InviteAcceptScreen, consumeInviteFromUrl,
-  getPendingInvite, clearPendingInvite,
-} from '@/components/InviteAcceptScreen'
+import { NoWorkspaceScreen } from '@/components/NoWorkspaceScreen'
 import { UpdateBanner, UpdaterDialog } from '@/components/UpdaterDialog'
-import { AdminApp } from '@/admin/AdminApp'
-import { WaitlistConfirmedScreen, consumeWaitlistFragment } from '@/admin/WaitlistConfirmedScreen'
-import { SuspendedScreen, consumeSuspendedFragment } from '@/admin/SuspendedScreen'
+import { WorkspaceSessionBridge } from '@/components/WorkspaceSessionBridge'
+import { DesktopApp } from '@/desktop/DesktopApp'
+import { Onboarding } from '@/desktop/Onboarding'
+import { isNotificationWindow, isWebAppHost } from '@/lib/runtime'
+import { useIsMobile } from '@/lib/utils'
+import { MobileApp } from '@/mobile/MobileApp'
+import { useApp } from '@/stores/app'
+import { useAuth } from '@/stores/auth'
+import { bootComputers, useComputers } from '@/stores/computers'
+import { bootConversations, isMuted, useConversations } from '@/stores/conversations'
+import { bootMessagesStream, useMessages } from '@/stores/messages'
+import { bootParticipants, useParticipants } from '@/stores/participants'
+import { usePrefs } from '@/stores/preferences'
+import { bootWhispers, useWhispers } from '@/stores/whispers'
+import { WebShell } from '@/web/WebShell'
 import '@/admin/admin.css'
 
 /** True iff this browser tab is for the admin panel. On prod the
@@ -262,7 +264,10 @@ export function App() {
   return (
     <AuthGate>
       <ErrorBoundary>
-        <AuthedApp key={`${userId ?? 'anon'}::${companyId ?? 'none'}`} />
+        <WorkspaceSessionBridge />
+        {userId && !companyId
+          ? <NoWorkspaceScreen />
+          : <AuthedApp key={`${userId ?? 'anon'}::${companyId ?? 'none'}`} />}
       </ErrorBoundary>
     </AuthGate>
   )

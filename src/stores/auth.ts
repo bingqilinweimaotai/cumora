@@ -51,6 +51,16 @@ interface AuthState {
 const TOKEN_KEY = 'cumora.auth.token'
 const COMPANY_KEY = 'cumora.auth.company'
 
+function resetWorkspaceStores(): void {
+  void Promise.all([
+    import('./documents').then(({ useDocuments }) => useDocuments.getState().reset()),
+    import('./boards').then(({ useBoards }) => useBoards.getState().reset()),
+    import('./calendar').then(({ useCalendar }) => useCalendar.getState().reset()),
+    import('./shipping').then(({ useShipping }) => useShipping.getState().reset()),
+    import('./app').then(({ useApp }) => useApp.getState().selectConversation(null)),
+  ])
+}
+
 export const useAuth = create<AuthState>((set) => ({
   token: localStorage.getItem(TOKEN_KEY),
   user: null,
@@ -77,6 +87,8 @@ export const useAuth = create<AuthState>((set) => ({
       ? stored
       : (activeCompanyId && memberIds.has(activeCompanyId) ? activeCompanyId : (companies[0]?.id ?? null))
     if (resolved) localStorage.setItem(COMPANY_KEY, resolved)
+    else localStorage.removeItem(COMPANY_KEY)
+    const previous = useAuth.getState().activeCompanyId
     set((s) => ({
       user,
       companies,
@@ -85,6 +97,7 @@ export const useAuth = create<AuthState>((set) => ({
         ? s.contextEpoch + 1
         : s.contextEpoch,
     }))
+    if (previous !== resolved) resetWorkspaceStores()
   },
   setServerCapabilities(caps) {
     set({ serverCapabilities: caps })
@@ -103,12 +116,7 @@ export const useAuth = create<AuthState>((set) => ({
     // next listXXX() lands. These stores are global singletons that
     // outlive the AuthedApp remount, so a key-change alone doesn't
     // clear them.
-    void Promise.all([
-      import('./documents').then(({ useDocuments }) => useDocuments.getState().reset()),
-      import('./boards').then(({ useBoards }) => useBoards.getState().reset()),
-      import('./calendar').then(({ useCalendar }) => useCalendar.getState().reset()),
-      import('./shipping').then(({ useShipping }) => useShipping.getState().reset()),
-    ])
+    resetWorkspaceStores()
   },
   /** Append a freshly-created company to the user's set and switch to it. */
   addCompany(c) {
@@ -123,12 +131,7 @@ export const useAuth = create<AuthState>((set) => ({
     // stores too so the new workspace doesn't render the previous
     // one's data while the first listXXX() is in flight.
     if (prevId && prevId !== c.id) {
-      void Promise.all([
-        import('./documents').then(({ useDocuments }) => useDocuments.getState().reset()),
-        import('./boards').then(({ useBoards }) => useBoards.getState().reset()),
-        import('./calendar').then(({ useCalendar }) => useCalendar.getState().reset()),
-        import('./shipping').then(({ useShipping }) => useShipping.getState().reset()),
-      ])
+      resetWorkspaceStores()
     }
   },
   clear() {
@@ -154,12 +157,7 @@ export const useAuth = create<AuthState>((set) => ({
     // waiting for whoever signs in next on a shared machine.
     void import('./app').then(({ useApp }) => useApp.getState().clearComposerDrafts())
     // Library stores survive logout otherwise (they're global singletons).
-    void Promise.all([
-      import('./documents').then(({ useDocuments }) => useDocuments.getState().reset()),
-      import('./boards').then(({ useBoards }) => useBoards.getState().reset()),
-      import('./calendar').then(({ useCalendar }) => useCalendar.getState().reset()),
-      import('./shipping').then(({ useShipping }) => useShipping.getState().reset()),
-    ])
+    resetWorkspaceStores()
   },
   markReady() {
     set({ ready: true })

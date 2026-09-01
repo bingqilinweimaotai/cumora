@@ -1,10 +1,10 @@
+import { getActiveCompanyId, getAuthToken, useAuth } from '@/stores/auth'
 import type {
-  Message, Status,
-  BoardSummary, BoardSnapshot, BoardCardComment, BoardCardLookup,
-  CalendarEvent, CalendarEventKind, CalendarEventStatus, CalendarDispatch, RecurrenceRule,
-  CalendarReminderChannel,ComputerStatus, ComputerKind, EngineId,
+  BoardCardComment, BoardCardLookup, BoardSnapshot, BoardSummary,
+  CalendarDispatch, CalendarEvent, CalendarEventKind, CalendarEventStatus,
+  CalendarReminderChannel, ComputerKind, ComputerStatus, EngineId,
+  Message, RecurrenceRule, Status,
 } from '@/types'
-import { getAuthToken, getActiveCompanyId, useAuth } from '@/stores/auth'
 
 const DEVTOOLS_KEY = 'cumora.devtools.enabled'
 const SERVER_URL_KEY = 'cumora.serverUrl'
@@ -640,6 +640,17 @@ export interface ApiInvitationEmailDelivery {
   skipped: 'no_email_config' | null
 }
 
+export type WorkspaceRole = 'owner' | 'admin' | 'member'
+
+export interface ApiWorkspaceMember {
+  id: string
+  name: string
+  email: string
+  avatarUrl: string | null
+  role: WorkspaceRole
+  joinedAt: string
+}
+
 export type ApiInvitationPreviewStatus =
   | 'valid' | 'revoked' | 'expired' | 'consumed'
   | 'wrong_email' | 'already_member' | 'not_found'
@@ -899,6 +910,22 @@ export const api = {
   createCompany: (name: string) =>
     http<{ id: string; name: string; slug: string; role: string }>('/companies', {
       method: 'POST', body: JSON.stringify({ name }),
+    }),
+  listWorkspaceMembers: (companyId: string) =>
+    http<ApiWorkspaceMember[]>(`/companies/${encodeURIComponent(companyId)}/members`),
+  updateWorkspaceMemberRole: (companyId: string, userId: string, role: 'member' | 'admin') =>
+    http<{ ok: true; member: ApiWorkspaceMember }>(
+      `/companies/${encodeURIComponent(companyId)}/members/${encodeURIComponent(userId)}`,
+      { method: 'PATCH', body: JSON.stringify({ role }) },
+    ),
+  removeWorkspaceMember: (companyId: string, userId: string) =>
+    http<{ ok: true }>(
+      `/companies/${encodeURIComponent(companyId)}/members/${encodeURIComponent(userId)}`,
+      { method: 'DELETE' },
+    ),
+  deleteCompany: (companyId: string, confirmation: string) =>
+    http<{ ok: true; nextCompanyId: string }>(`/companies/${encodeURIComponent(companyId)}`, {
+      method: 'DELETE', body: JSON.stringify({ confirmation }),
     }),
   /** Owner/admin-only: list every invitation (active + historical) for a
    *  company so the management UI can show recent activity. */
@@ -1537,6 +1564,15 @@ export type WsEvent =
       poll: import('../types.js').PollPayload
       tallies: import('../types.js').PollTally[]
       actorId: string | null
+    }
+  | {
+      type: 'workspace.membership'
+      kind: 'role_changed' | 'removed' | 'workspace_deleted'
+      companyId: string
+      recipientUserIds: string[]
+      actorId: string
+      userId?: string
+      role?: 'admin' | 'member'
     }
 
 type Listener = (e: WsEvent) => void

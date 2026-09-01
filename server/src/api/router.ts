@@ -5,7 +5,7 @@ import {
   storageKeyFromPublicUrl, messageAttachmentStorageKey,
 } from '../storage.js'
 import { pool } from '../db/pool.js'
-import { CH_MESSAGE_NEW, CH_REACTIONS, CH_CONVO_UPDATED, CH_DOCS, CH_TYPING, CH_CALENDAR_EVENTS, CH_BOARDS, CH_STATUS, publish } from '../redis.js'
+import { CH_MESSAGE_NEW, CH_REACTIONS, CH_CONVO_UPDATED, CH_DOCS, CH_TYPING, CH_CALENDAR_EVENTS, CH_BOARDS, CH_STATUS, CH_WORKSPACES, publish } from '../redis.js'
 import { enqueueBroadcast, nudgeRealtimeOutbox, withOutboxTransaction } from '../realtime-outbox.js'
 import { createPoll, castVote, closePoll, PollError } from '../polls.js'
 import { env } from '../env.js'
@@ -1476,6 +1476,376 @@ async function requireCompanyAdmin(req: Request & AuthedRequest, companyId: stri
   return { userId: me, role: rows[0].role }
 }
 
+type WorkspaceMemberRole = 'owner' | 'admin' | 'member'
+const MUTABLE_WORKSPACE_ROLES = new Set<WorkspaceMemberRole>(['admin', 'member'])
+
+interface WorkspaceMemberRow {
+  id: string
+  name: string
+  email: string
+  avatar_url: string | null
+  role: WorkspaceMemberRole
+  joined_at: string
+}
+
+function serializeWorkspaceMember(row: WorkspaceMemberRow) {
+  return {
+    id: row.id,
+    name: row.name,
+    email: row.email,
+    avatarUrl: row.avatar_url,
+    role: row.role,
+    joinedAt: new Date(row.joined_at).toISOString(),
+  }
+}
+
+async function publishWorkspaceMembership(event: {
+  companyId: string
+  kind: 'role_changed' | 'removed' | 'workspace_deleted'
+  recipientUserIds: string[]
+  actorId: string
+  userId?: string
+  role?: 'admin' | 'member'
+}): Promise<void> {
+  await publish(CH_WORKSPACES, { type: 'workspace.membership', ...event }).catch((error) => {
+    console.warn('[workspaces] membership event publish failed', error instanceof Error ? error.message : error)
+  })
+}
+
+/** List the human membership roster and its actual company_members role.
+ * `/participants` deliberately exposes an agent's job role instead, so it is
+ * not a safe source for workspace authorization UI. */
+api.get('/companies/:id/members', safe(async (req, res) => {
+  const companyId = String(req.params.id)
+  await requireCompanyAdmin(req, companyId)
+  const { rows } = await pool.query<WorkspaceMemberRow>(
+    `SELECT cm.user_id AS id,
+            u.display_name AS name,
+            u.email,
+            u.avatar_url,
+            cm.role,
+            cm.joined_at
+       FROM company_members cm
+       JOIN users u ON u.id = cm.user_id
+      WHERE cm.company_id = $1
+      ORDER BY CASE cm.role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END,
+               LOWER(u.display_name), cm.joined_at`,
+    [companyId],
+  )
+  res.json(rows.map(serializeWorkspaceMember))
+}))
+
+/** Change an existing member between member/admin. Ownership is immutable here
+ * and only the owner may change roles; ownership transfer needs its own flow. */
+api.patch('/companies/:id/members/:userId', safe(async (req, res) => {
+  const companyId = String(req.params.id)
+  const targetUserId = String(req.params.userId)
+  const requestedRole = String(req.body?.role ?? '') as WorkspaceMemberRole
+  if (!MUTABLE_WORKSPACE_ROLES.has(requestedRole)) {
+    throw new HttpError(400, 'role must be member or admin')
+  }
+  const nextRole = requestedRole as 'admin' | 'member'
+  const me = requireAuth(req)
+  const client = await pool.connect()
+  let previousRole: WorkspaceMemberRole
+  try {
+    await client.query('BEGIN')
+    const { rows: actors } = await client.query<{ role: WorkspaceMemberRole; owner_user_id: string | null }>(
+      `SELECT actor.role, c.owner_user_id
+         FROM companies c
+         JOIN company_members actor
+           ON actor.company_id = c.id AND actor.user_id = $2
+        WHERE c.id = $1
+        FOR UPDATE OF c, actor`,
+      [companyId, me],
+    )
+    if (!actors[0]) throw new HttpError(403, 'not a member of this company')
+    if (actors[0].role !== 'owner') throw new HttpError(403, 'only the workspace owner can change member roles')
+
+    const { rows: targets } = await client.query<{ role: WorkspaceMemberRole }>(
+      `SELECT role FROM company_members
+        WHERE company_id = $1 AND user_id = $2
+        FOR UPDATE`,
+      [companyId, targetUserId],
+    )
+    if (!targets[0]) throw new HttpError(404, 'workspace member not found')
+    previousRole = targets[0].role
+    if (previousRole === 'owner' || actors[0].owner_user_id === targetUserId) {
+      throw new HttpError(409, 'workspace ownership cannot be changed here')
+    }
+    await client.query(
+      `UPDATE company_members SET role = $3
+        WHERE company_id = $1 AND user_id = $2`,
+      [companyId, targetUserId, nextRole],
+    )
+    await client.query('COMMIT')
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {})
+    throw error
+  } finally {
+    client.release()
+  }
+
+  const { rows } = await pool.query<WorkspaceMemberRow>(
+    `SELECT cm.user_id AS id, u.display_name AS name, u.email, u.avatar_url,
+            cm.role, cm.joined_at
+       FROM company_members cm JOIN users u ON u.id = cm.user_id
+      WHERE cm.company_id = $1 AND cm.user_id = $2`,
+    [companyId, targetUserId],
+  )
+  const ip = req.socket.remoteAddress ?? null
+  const ua = (req.headers['user-agent'] as string | undefined) ?? null
+  await audit({
+    kind: 'workspace_member_role_changed', userId: me, companyId, ip, userAgent: ua,
+    detail: { targetUserId, previousRole, role: nextRole },
+  })
+  await publishWorkspaceMembership({
+    companyId, kind: 'role_changed', recipientUserIds: [targetUserId],
+    actorId: me, userId: targetUserId, role: nextRole,
+  })
+  res.json({ ok: true, member: serializeWorkspaceMember(rows[0]) })
+}))
+
+/** Remove a human from a workspace while preserving authored history. The
+ * authorization rows, active participant state, and every conversation roster
+ * change in one transaction so there is no partial-access window. */
+api.delete('/companies/:id/members/:userId', safe(async (req, res) => {
+  const companyId = String(req.params.id)
+  const targetUserId = String(req.params.userId)
+  const me = requireAuth(req)
+  if (targetUserId === me) throw new HttpError(409, 'use a dedicated leave-workspace flow to remove yourself')
+
+  const client = await pool.connect()
+  let targetRole: WorkspaceMemberRole
+  try {
+    await client.query('BEGIN')
+    const { rows: actors } = await client.query<{ role: WorkspaceMemberRole; owner_user_id: string | null }>(
+      `SELECT actor.role, c.owner_user_id
+         FROM companies c
+         JOIN company_members actor
+           ON actor.company_id = c.id AND actor.user_id = $2
+        WHERE c.id = $1
+        FOR UPDATE OF c, actor`,
+      [companyId, me],
+    )
+    const actor = actors[0]
+    if (!actor) throw new HttpError(403, 'not a member of this company')
+    if (actor.role !== 'owner' && actor.role !== 'admin') {
+      throw new HttpError(403, 'only owners and admins can remove workspace members')
+    }
+
+    const { rows: targets } = await client.query<{ role: WorkspaceMemberRole }>(
+      `SELECT role FROM company_members
+        WHERE company_id = $1 AND user_id = $2
+        FOR UPDATE`,
+      [companyId, targetUserId],
+    )
+    if (!targets[0]) throw new HttpError(404, 'workspace member not found')
+    targetRole = targets[0].role
+    if (targetRole === 'owner' || actor.owner_user_id === targetUserId) {
+      throw new HttpError(409, 'the workspace owner cannot be removed')
+    }
+    if (actor.role === 'admin' && targetRole !== 'member') {
+      throw new HttpError(403, 'admins can remove regular members only')
+    }
+
+    await client.query(
+      `UPDATE conversations
+          SET members = members - $2::text, updated_at = NOW()
+        WHERE company_id = $1 AND members @> to_jsonb(ARRAY[$2::text])`,
+      [companyId, targetUserId],
+    )
+    await client.query(
+      `UPDATE participants
+          SET departed_at = NOW(), status = 'resting', status_updated_at = NOW()
+        WHERE company_id = $1 AND id = $2 AND kind = 'human'`,
+      [companyId, targetUserId],
+    )
+    await client.query(`DELETE FROM conversation_reads WHERE company_id = $1 AND user_id = $2`, [companyId, targetUserId])
+    await client.query(
+      `DELETE FROM conversation_mutes
+        WHERE user_id = $2
+          AND conversation_id IN (SELECT id FROM conversations WHERE company_id = $1)`,
+      [companyId, targetUserId],
+    )
+    await client.query(`DELETE FROM agent_autonomy WHERE company_id = $1 AND user_id = $2`, [companyId, targetUserId])
+    await client.query(`DELETE FROM user_preferences WHERE company_id = $1 AND user_id = $2`, [companyId, targetUserId])
+    await client.query(
+      `DELETE FROM company_members WHERE company_id = $1 AND user_id = $2`,
+      [companyId, targetUserId],
+    )
+    await client.query('COMMIT')
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {})
+    throw error
+  } finally {
+    client.release()
+  }
+
+  const ip = req.socket.remoteAddress ?? null
+  const ua = (req.headers['user-agent'] as string | undefined) ?? null
+  await audit({
+    kind: 'workspace_member_removed', userId: me, companyId, ip, userAgent: ua,
+    detail: { targetUserId, previousRole: targetRole },
+  })
+  await publishWorkspaceMembership({
+    companyId, kind: 'removed', recipientUserIds: [targetUserId],
+    actorId: me, userId: targetUserId,
+  })
+  res.json({ ok: true })
+}))
+
+async function cleanupDeletedWorkspaceResources(agentIds: string[], storageKeys: string[]): Promise<void> {
+  // Storage keys pre-date tenant namespaces. Re-check all remaining references
+  // before deleting so a deliberately re-shared object in another workspace is
+  // never removed with the source workspace.
+  for (const key of storageKeys) {
+    try {
+      const { rows } = await pool.query<{ referenced: boolean }>(
+        `SELECT EXISTS (
+           SELECT 1 FROM email_attachments WHERE storage_key = $1
+           UNION ALL
+           SELECT 1 FROM messages WHERE attachment::text LIKE '%' || $1 || '%'
+           UNION ALL
+           SELECT 1 FROM participants WHERE avatar_url LIKE '%' || $1 || '%'
+         ) AS referenced`,
+        [key],
+      )
+      if (!rows[0]?.referenced) await storage.deleteObject(key)
+    } catch (error) {
+      console.warn(`[workspaces] storage cleanup failed for ${key}`, error instanceof Error ? error.message : error)
+    }
+  }
+
+  // Integration databases do not have a Kubernetes control plane. Production
+  // cleanup is idempotent; failures are logged and the normal cluster GC can
+  // retry leftovers.
+  if (/test/i.test(env.DATABASE_URL)) return
+  try {
+    const { deletePod, deleteChromeProfilePvc } = await import('../agents/runtime/orchestrator.js')
+    await Promise.allSettled(agentIds.flatMap((id) => [deletePod(id), deleteChromeProfilePvc(id)]))
+  } catch (error) {
+    console.warn('[workspaces] agent runtime cleanup failed', error instanceof Error ? error.message : error)
+  }
+}
+
+/** Hard-delete a workspace's tenant data. The schema contains both modern
+ * company FKs and legacy soft company_id columns, so the explicit deletes are
+ * intentional; relying on DELETE companies CASCADE alone would leave orphans. */
+api.delete('/companies/:id', safe(async (req, res) => {
+  const companyId = String(req.params.id)
+  const confirmation = String(req.body?.confirmation ?? '').trim()
+  const me = requireAuth(req)
+  const client = await pool.connect()
+  let companyName = ''
+  let memberIds: string[] = []
+  let agentIds: string[] = []
+  const storageKeys = new Set<string>()
+  let nextCompanyId: string | null = null
+  try {
+    await client.query('BEGIN')
+    const { rows: companies } = await client.query<{
+      name: string; owner_user_id: string | null; role: WorkspaceMemberRole
+    }>(
+      `SELECT c.name, c.owner_user_id, cm.role
+         FROM companies c
+         JOIN company_members cm ON cm.company_id = c.id AND cm.user_id = $2
+        WHERE c.id = $1
+        FOR UPDATE OF c, cm`,
+      [companyId, me],
+    )
+    const company = companies[0]
+    if (!company) throw new HttpError(404, 'workspace not found')
+    if (company.role !== 'owner' || (company.owner_user_id && company.owner_user_id !== me)) {
+      throw new HttpError(403, 'only the workspace owner can delete it')
+    }
+    companyName = company.name
+    if (!confirmation || confirmation !== companyName) {
+      throw new HttpError(400, 'type the workspace name exactly to confirm deletion')
+    }
+    const { rows: alternatives } = await client.query<{ company_id: string }>(
+      `SELECT company_id FROM company_members
+        WHERE user_id = $1 AND company_id <> $2
+        ORDER BY joined_at ASC LIMIT 1`,
+      [me, companyId],
+    )
+    nextCompanyId = alternatives[0]?.company_id ?? null
+    if (!nextCompanyId) throw new HttpError(409, 'you cannot delete your only workspace')
+
+    const { rows: members } = await client.query<{ user_id: string }>(
+      `SELECT user_id FROM company_members WHERE company_id = $1`, [companyId],
+    )
+    memberIds = members.map((row) => row.user_id)
+    const { rows: agents } = await client.query<{ id: string; avatar_url: string | null }>(
+      `SELECT id, avatar_url FROM participants WHERE company_id = $1 AND kind = 'agent'`, [companyId],
+    )
+    agentIds = agents.map((row) => row.id)
+    for (const row of agents) {
+      if (!row.avatar_url) continue
+      const key = storageKeyFromPublicUrl(row.avatar_url)
+      if (key) storageKeys.add(key)
+    }
+    const { rows: emailFiles } = await client.query<{ storage_key: string | null }>(
+      `SELECT storage_key FROM email_attachments WHERE company_id = $1`, [companyId],
+    )
+    for (const row of emailFiles) {
+      const key = row.storage_key ? normalizeStorageKey(row.storage_key) : null
+      if (key) storageKeys.add(key)
+    }
+    const { rows: messageFiles } = await client.query<{ attachment: unknown }>(
+      `SELECT attachment FROM messages WHERE company_id = $1 AND attachment IS NOT NULL`, [companyId],
+    )
+    for (const row of messageFiles) {
+      const candidates = Array.isArray(row.attachment) ? row.attachment : [row.attachment]
+      for (const candidate of candidates) {
+        if (!candidate || typeof candidate !== 'object') continue
+        const key = messageAttachmentStorageKey(candidate as { key?: unknown; url?: unknown })
+        if (key) storageKeys.add(key)
+      }
+    }
+
+    // Child/root rows with soft company_id references. FK-backed trees such as
+    // boards, calendar, projects, invitations, and shipping cascade from the
+    // final companies delete below.
+    const softScopedTables = [
+      'document_mentions', 'email_attachments', 'email_messages', 'email_contacts',
+      'poll_votes', 'message_reactions', 'tool_calls', 'conversation_reads',
+      'agent_events', 'agent_runs', 'agent_triages', 'llm_calls', 'llm_calls_rollup',
+      'agent_workspace', 'agent_memory', 'agent_log', 'agent_tasks', 'agent_autonomy',
+      'agent_climate', 'user_preferences', 'computers',
+    ] as const
+    for (const table of softScopedTables) {
+      await client.query(`DELETE FROM ${table} WHERE company_id = $1`, [companyId])
+    }
+    if (agentIds.length > 0) {
+      await client.query(`DELETE FROM board_mention_reads WHERE user_id = ANY($1::text[])`, [agentIds])
+    }
+    await client.query(`DELETE FROM documents WHERE company_id = $1`, [companyId])
+    await client.query(`DELETE FROM conversations WHERE company_id = $1`, [companyId])
+    await client.query(`DELETE FROM participants WHERE company_id = $1`, [companyId])
+    await client.query(`DELETE FROM companies WHERE id = $1`, [companyId])
+    await client.query('COMMIT')
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {})
+    throw error
+  } finally {
+    client.release()
+  }
+
+  const ip = req.socket.remoteAddress ?? null
+  const ua = (req.headers['user-agent'] as string | undefined) ?? null
+  await audit({
+    kind: 'workspace_deleted', userId: me, companyId, ip, userAgent: ua,
+    detail: { name: companyName, memberCount: memberIds.length, agentCount: agentIds.length },
+  })
+  await publishWorkspaceMembership({
+    companyId, kind: 'workspace_deleted', recipientUserIds: memberIds,
+    actorId: me,
+  })
+  void cleanupDeletedWorkspaceResources(agentIds, [...storageKeys])
+  res.json({ ok: true, nextCompanyId })
+}))
+
 /** Build the public-facing accept URL for an invite — always an https web
  *  origin (e.g. https://app.cumora.ai/invite/<token>). The web bundle hosted
  *  there has its API origin baked in at build time (VITE_CUMORA_API_BASE), so
@@ -1553,7 +1923,7 @@ api.get('/companies/:id/invitations', safe(async (req, res) => {
  *  hash, so this is the only chance to copy the link. */
 api.post('/companies/:id/invitations', safe(async (req, res) => {
   const companyId = String(req.params.id)
-  const { userId: me } = await requireCompanyAdmin(req, companyId)
+  const { userId: me, role: actorRole } = await requireCompanyAdmin(req, companyId)
   const body = req.body ?? {}
   const rawEmail = typeof body.email === 'string' ? body.email.trim() : ''
   const email = rawEmail ? rawEmail.toLowerCase() : null
@@ -1562,6 +1932,9 @@ api.post('/companies/:id/invitations', safe(async (req, res) => {
   }
   const role = typeof body.role === 'string' && INVITE_ALLOWED_ROLES.has(body.role)
     ? body.role : 'member'
+  if (actorRole === 'admin' && role === 'admin') {
+    throw new HttpError(403, 'only the workspace owner can invite another admin')
+  }
   const note = typeof body.note === 'string' ? body.note.trim().slice(0, 280) || null : null
   const multiUse = body.multiUse === true || (!email && body.maxUses !== 1)
   const requestedMaxUses = Number(body.maxUses ?? (email ? 1 : INVITE_MAX_LINK_USES))
@@ -1823,7 +2196,13 @@ api.post('/invitations/:token/accept', safe(async (req, res) => {
     await client.query(
       `INSERT INTO participants (id, kind, name, role, initial, avatar_bg, avatar_url, status, company_id)
        VALUES ($1, 'human', $2, NULL, $3, '#FF8870', $4, 'avail', $5)
-       ON CONFLICT (id, company_id) DO NOTHING`,
+       ON CONFLICT (id, company_id) DO UPDATE
+         SET name = EXCLUDED.name,
+             initial = EXCLUDED.initial,
+             avatar_url = EXCLUDED.avatar_url,
+             status = 'avail',
+             status_updated_at = NOW(),
+             departed_at = NULL`,
       [me, displayName, displayName.charAt(0).toUpperCase(),
        userAvatar, inv.company_id],
     )
