@@ -351,15 +351,17 @@ test('Codex one-shot paths send prompts through stdin', async () => {
   await mkdir(home)
 
   const capture = join(binDir, 'capture.js')
-  await writeFile(
-    capture,
-    "let stdin = ''\n" +
+  const captureSource = "let stdin = ''\n" +
     "process.stdin.setEncoding('utf8')\n" +
     "process.stdin.on('data', (chunk) => { stdin += chunk })\n" +
-    "process.stdin.on('end', () => process.stdout.write(JSON.stringify({ argv: process.argv.slice(2), stdin })))\n",
-    'utf8',
-  )
+    "process.stdin.on('end', () => process.stdout.write(JSON.stringify({ argv: process.argv.slice(2), stdin })))\n"
+  await writeFile(capture, captureSource, 'utf8')
   if (IS_WIN) {
+    // Mirror npm's standard layout. Cumora must invoke this JS entry point
+    // directly so cmd.exe cannot strip quotes from structured TOML -c values.
+    const packageBin = join(binDir, 'node_modules', '@openai', 'codex', 'bin')
+    await mkdir(packageBin, { recursive: true })
+    await writeFile(join(packageBin, 'codex.js'), captureSource, 'utf8')
     await writeFile(join(binDir, 'codex.cmd'), '@echo off\r\nnode "%~dp0capture.js" %*\r\n', 'utf8')
   } else {
     const launcher = join(binDir, 'codex')

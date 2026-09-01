@@ -27,7 +27,7 @@ import { randomUUID } from 'node:crypto'
 import { existsSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { access, lstat, mkdir, mkdtemp, rename, rm, writeFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
-import { dirname, join, delimiter as PATH_DELIMITER } from 'node:path'
+import { basename, dirname, join, delimiter as PATH_DELIMITER } from 'node:path'
 import { StringDecoder } from 'node:string_decoder'
 import { stripLoneSurrogates } from '../text-safety.js'
 import { isCliVersionAtLeast, probeEngineVersion, probeLocalEngineVersion } from './cli-version.js'
@@ -315,6 +315,38 @@ export function resolveSpawn(bin: string): { command: string; shell: boolean; wa
   }
   // Not found on PATH at all — let the shell resolve it, and feed the prompt via stdin.
   return { command: bin, shell: true, wantsStdinPrompt: true }
+}
+
+type CodexSpawn = ReturnType<typeof resolveSpawn> & { argsPrefix: string[] }
+
+/** npm's Windows `codex.cmd` forwards arguments through `%*`. Running that
+ * shim with Node's `shell:true` lets cmd.exe consume the double quotes inside
+ * structured `-c key=<toml>` values. A valid inline TOML table then reaches
+ * Codex as a plain string and strict config loading fails before the turn can
+ * start. Bypass cmd.exe by invoking the npm package's JS entry point with the
+ * same Node installation whenever the standard npm layout is available. */
+function resolveCodexSpawn(): CodexSpawn {
+  const fallback = resolveSpawn('codex')
+  if (!IS_WIN || !fallback.shell) return { ...fallback, argsPrefix: [] }
+
+  const shim = fallback.command.startsWith('"') && fallback.command.endsWith('"')
+    ? fallback.command.slice(1, -1)
+    : fallback.command
+  if (!/\.cmd$/i.test(shim)) return { ...fallback, argsPrefix: [] }
+
+  const shimDir = dirname(shim)
+  const script = join(shimDir, 'node_modules', '@openai', 'codex', 'bin', 'codex.js')
+  if (!existsSync(script)) return { ...fallback, argsPrefix: [] }
+
+  const nodeCandidates = [
+    join(shimDir, 'node.exe'),
+    ...(process.env.PATH ?? '').split(PATH_DELIMITER).filter(Boolean).map((dir) => join(dir, 'node.exe')),
+  ]
+  const node = nodeCandidates.find((candidate) => existsSync(candidate))
+    ?? (/^node(?:\.exe)?$/i.test(basename(process.execPath)) ? process.execPath : null)
+  if (!node) return { ...fallback, argsPrefix: [] }
+
+  return { command: node, argsPrefix: [script], shell: false, wantsStdinPrompt: false }
 }
 
 export type EngineId = 'claude' | 'codex' | 'grok' | 'cursor' | 'opencode' | 'pi' | 'gemini' | 'qwen'
@@ -1943,12 +1975,13 @@ class CodexAdapter implements EngineAdapter {
     // a different small model.
     const flags = allowUnsandboxedByoa() ? extraArgs('CUMORA_TRIAGE_ARGS') : []
     const model = ['--model', args.model || 'gpt-5.4-mini']
-    const { command, shell } = resolveSpawn(this.bin)
-    const argv = flags.length
+    const { command, shell, argsPrefix } = resolveCodexSpawn()
+    const codexArgs = flags.length
       ? ['exec', ...flags, '-']
       : allowUnsandboxedByoa()
         ? ['exec', ...model, '--skip-git-repo-check', '-']
         : [...codexSecureExecArgs({ home: args.cwd, env: args.env }, true), ...model, '--skip-git-repo-check', '-']
+    const argv = [...argsPrefix, ...codexArgs]
     return spawnCapture(command, argv, {
       cwd: args.cwd, env: args.env, signal: args.signal, onLog: args.onLog, shell,
       stdinText: args.prompt,
@@ -1960,10 +1993,11 @@ class CodexAdapter implements EngineAdapter {
     // its default model. `exec` non-interactive, no bypass/sandbox flags needed
     // for a tool-free one-token reply.
     const model = args.tier === 'small' ? ['--model', triageModel('gpt-5.4-mini')] : []
-    const { command, shell } = resolveSpawn(this.bin)
-    const argv = allowUnsandboxedByoa()
+    const { command, shell, argsPrefix } = resolveCodexSpawn()
+    const codexArgs = allowUnsandboxedByoa()
       ? ['exec', ...model, '--skip-git-repo-check', '-']
       : [...codexSecureExecArgs({ home: args.cwd, env: args.env }, true), ...model, '--skip-git-repo-check', '-']
+    const argv = [...argsPrefix, ...codexArgs]
     return spawnCapture(command, argv, {
       cwd: args.cwd, env: args.env, signal: args.signal, shell, stdinText: DOCTOR_PROMPT,
     })
@@ -1990,7 +2024,7 @@ class CodexAdapter implements EngineAdapter {
     catch (err) {
       return Promise.resolve({ ok: false, detail: `git init failed for app-server cwd: ${err instanceof Error ? err.message : String(err)}` })
     }
-    const { command, shell } = resolveSpawn(this.bin)
+    const { command, shell, argsPrefix } = resolveCodexSpawn()
     return new Promise<EngineWakeProbeResult>((resolve) => {
       let settled = false
       const finish = (r: EngineWakeProbeResult) => {
@@ -1999,7 +2033,7 @@ class CodexAdapter implements EngineAdapter {
         try { child.stdin?.end() } catch { /* ignore */ }
         void terminateEngineTree(child).then(() => resolve(r))
       }
-      const appServerArgs = ['app-server', '--listen', 'stdio://']
+      const appServerArgs = [...argsPrefix, 'app-server', '--listen', 'stdio://']
       const child = spawnEngineChild(command, appServerArgs, {
         cwd: args.cwd, env: args.env, stdio: ['pipe', 'pipe', 'pipe'], shell,
       })
@@ -2084,8 +2118,8 @@ class CodexAdapter implements EngineAdapter {
         ? ['exec', '--dangerously-bypass-approvals-and-sandbox', '--skip-git-repo-check']
         : [...codexSecureExecArgs(args), '--skip-git-repo-check']
     const model = args.model ? ['--model', args.model] : []
-    const { command, shell } = resolveSpawn(this.bin)
-    return spawnEngine(command, [...base, ...model, '-'], args, { shell, stdinText: args.prompt })
+    const { command, shell, argsPrefix } = resolveCodexSpawn()
+    return spawnEngine(command, [...argsPrefix, ...base, ...model, '-'], args, { shell, stdinText: args.prompt })
   }
 
   startSession(args: EngineSessionArgs): EngineSession | null {
@@ -2103,7 +2137,8 @@ class CodexAdapter implements EngineAdapter {
     catch (err) { args.onLog(`[codex] could not init git repo for app-server (${err instanceof Error ? err.message : String(err)}) — falling back to one-shot exec`); return null }
     // Standing prompt rides the thread's developerInstructions (see CodexSession),
     // approval/sandbox are set per-thread, so no global bypass flags are needed.
-    return new CodexSession(this.bin, ['app-server', '--listen', 'stdio://'], args.home, args.env, args)
+    const { command, argsPrefix } = resolveCodexSpawn()
+    return new CodexSession(command, [...argsPrefix, 'app-server', '--listen', 'stdio://'], args.home, args.env, args)
   }
 }
 
