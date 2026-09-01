@@ -29,6 +29,23 @@ function secureClaudeEnv(root: string, overrides: NodeJS.ProcessEnv = {}): NodeJ
   }
 }
 
+/** Install a fake CLI that follows the platform's executable conventions. */
+async function writeFakeCli(binDir: string, name: string, source: string): Promise<void> {
+  const scriptName = `${name}-fixture.js`
+  await writeFile(join(binDir, scriptName), source, 'utf8')
+  if (IS_WIN) {
+    await writeFile(join(binDir, `${name}.cmd`), `@echo off\r\n"${process.execPath}" "%~dp0${scriptName}" %*\r\n`, 'utf8')
+    return
+  }
+  const launcher = join(binDir, name)
+  await writeFile(launcher, `#!/bin/sh\nexec node "$(dirname "$0")/${scriptName}" "$@"\n`, 'utf8')
+  await chmod(launcher, 0o755)
+}
+
+function useFakeCliPath(binDir: string): void {
+  process.env.PATH = `${binDir}${delimiter}${process.env.PATH ?? ''}`
+}
+
 test('engine subprocesses always suppress Windows console windows', () => {
   assert.deepEqual(headlessSpawnOptions({ shell: true, cwd: 'C:\\agent home', windowsHide: false }), {
     shell: true,
@@ -128,21 +145,18 @@ test('local engine failure returns stderr tail for observability', async () => {
   const home = join(root, 'home')
   await mkdir(binDir)
   await mkdir(home)
-  const fakeClaude = join(binDir, 'claude')
-  await writeFile(
-    fakeClaude,
-    '#!/bin/sh\n' +
-    'echo "Claude Code error: usage limit reached, no tokens left" >&2\n' +
-    'exit 1\n',
-    'utf8',
+  await writeFakeCli(
+    binDir,
+    'claude',
+    "process.stderr.write('Claude Code error: usage limit reached, no tokens left\\n')\nprocess.exit(1)\n",
   )
-  await chmod(fakeClaude, 0o755)
+  useFakeCliPath(binDir)
 
   const logs: string[] = []
   const result = await getAdapter('claude').run({
     home,
     prompt: 'wake',
-    env: secureClaudeEnv(root, { PATH: `${binDir}:${process.env.PATH ?? ''}` }),
+    env: secureClaudeEnv(root),
     model: null,
     fastModel: null,
     onLog: (line) => logs.push(line),
@@ -154,22 +168,19 @@ test('local engine failure returns stderr tail for observability', async () => {
   assert.deepEqual(logs, ['Claude Code error: usage limit reached, no tokens left'])
 })
 
-test('Claude secure mode is fail-closed and strips tool credentials', async () => {
+test('Claude secure mode is fail-closed and strips tool credentials', { skip: IS_WIN }, async () => {
   const root = await mkdtemp(join(tmpdir(), 'cumora-claude-secure-'))
   tempDirs.push(root)
   const binDir = join(root, 'bin')
   const home = join(root, 'home')
   await mkdir(binDir)
   await mkdir(home)
-  const capture = join(binDir, 'capture.js')
-  await writeFile(
-    capture,
+  await writeFakeCli(
+    binDir,
+    'claude',
     "process.stderr.write(JSON.stringify({ argv: process.argv.slice(2), scrub: process.env.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB }))\nprocess.exit(1)\n",
-    'utf8',
   )
-  const launcher = join(binDir, 'claude')
-  await writeFile(launcher, '#!/bin/sh\nexec node "$(dirname "$0")/capture.js" "$@"\n', 'utf8')
-  await chmod(launcher, 0o755)
+  useFakeCliPath(binDir)
 
   const logs: string[] = []
   const mcpShim = join(root, 'trusted', 'cumora-mcp')
@@ -177,7 +188,6 @@ test('Claude secure mode is fail-closed and strips tool credentials', async () =
     home,
     prompt: 'wake',
     env: secureClaudeEnv(root, {
-      PATH: `${binDir}:${process.env.PATH ?? ''}`,
       OPENAI_API_KEY: 'must-not-appear-in-settings',
     }),
     onLog: (line) => logs.push(line),
@@ -229,20 +239,17 @@ test('persistent Claude startup failure keeps stderr for first send', async () =
   const home = join(root, 'home')
   await mkdir(binDir)
   await mkdir(home)
-  const fakeClaude = join(binDir, 'claude')
-  await writeFile(
-    fakeClaude,
-    '#!/bin/sh\n' +
-    'echo "Claude Code error: subscription expired" >&2\n' +
-    'exit 1\n',
-    'utf8',
+  await writeFakeCli(
+    binDir,
+    'claude',
+    "process.stderr.write('Claude Code error: subscription expired\\n')\nprocess.exit(1)\n",
   )
-  await chmod(fakeClaude, 0o755)
+  useFakeCliPath(binDir)
 
   const logs: string[] = []
   const session = getAdapter('claude').startSession?.({
     home,
-    env: secureClaudeEnv(root, { PATH: `${binDir}:${process.env.PATH ?? ''}` }),
+    env: secureClaudeEnv(root),
     model: null,
     fastModel: null,
     onLog: (line) => logs.push(line),
@@ -269,16 +276,16 @@ test('grok adapter seeds AGENTS.md and reports sessionId from stream-json', asyn
   const home = join(root, 'home')
   await mkdir(binDir)
   await mkdir(home)
-  const fakeGrok = join(binDir, 'grok')
-  await writeFile(
-    fakeGrok,
-    '#!/bin/sh\n' +
-    'echo \'{"type":"system","subtype":"init","session_id":"sess-grok-1","model":"grok-4.6"}\'\n' +
-    'echo \'{"type":"result","subtype":"success","session_id":"sess-grok-1","usage":{"input_tokens":3,"output_tokens":1},"result":"OK"}\'\n' +
-    'exit 0\n',
-    'utf8',
+  const grokEvents = [
+    { type: 'system', subtype: 'init', session_id: 'sess-grok-1', model: 'grok-4.6' },
+    { type: 'result', subtype: 'success', session_id: 'sess-grok-1', usage: { input_tokens: 3, output_tokens: 1 }, result: 'OK' },
+  ]
+  await writeFakeCli(
+    binDir,
+    'grok',
+    `process.stdout.write(${JSON.stringify(`${grokEvents.map((event) => JSON.stringify(event)).join('\n')}\n`)})\n`,
   )
-  await chmod(fakeGrok, 0o755)
+  useFakeCliPath(binDir)
 
   const adapter = getAdapter('grok')
   await adapter.seedHome(home, { id: 'iris', name: 'Iris', role: 'Designer', systemPrompt: null })
@@ -288,7 +295,7 @@ test('grok adapter seeds AGENTS.md and reports sessionId from stream-json', asyn
   const result = await adapter.run({
     home,
     prompt: 'wake',
-    env: secureClaudeEnv(root, { PATH: `${binDir}:${process.env.PATH ?? ''}` }),
+    env: secureClaudeEnv(root),
     model: null,
     fastModel: null,
     onLog: () => { /* unused */ },
