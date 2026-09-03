@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { type ApiWorkspaceMember, api, ws } from '@/api/client'
 import { useT } from '@/lib/i18n'
 import { type AuthCompany, useAuth } from '@/stores/auth'
@@ -13,8 +13,7 @@ interface Props {
 export function WorkspaceSettingsModal({ company, companyCount, onInvite, onClose }: Props) {
   const t = useT()
   const meId = useAuth((s) => s.user?.id)
-  const setMe = useAuth((s) => s.setMe)
-  const setServerCapabilities = useAuth((s) => s.setServerCapabilities)
+  const removeCompany = useAuth((s) => s.removeCompany)
   const [members, setMembers] = useState<ApiWorkspaceMember[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -22,6 +21,7 @@ export function WorkspaceSettingsModal({ company, companyCount, onInvite, onClos
   const [deleteConfirmation, setDeleteConfirmation] = useState('')
   const [deleting, setDeleting] = useState(false)
   const [deleteError, setDeleteError] = useState<string | null>(null)
+  const memberLoadGeneration = useRef(0)
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -31,19 +31,31 @@ export function WorkspaceSettingsModal({ company, companyCount, onInvite, onClos
     return () => window.removeEventListener('keydown', onKey)
   }, [deleting, onClose])
 
-  useEffect(() => {
-    let cancelled = false
-    setLoading(true)
+  const loadMembers = useCallback(async (showLoading: boolean) => {
+    const generation = ++memberLoadGeneration.current
+    if (showLoading) setLoading(true)
     setError(null)
-    void api.listWorkspaceMembers(company.id).then((rows) => {
-      if (!cancelled) setMembers(rows)
-    }).catch((reason) => {
-      if (!cancelled) setError(reason instanceof Error ? reason.message : String(reason))
-    }).finally(() => {
-      if (!cancelled) setLoading(false)
-    })
-    return () => { cancelled = true }
+    try {
+      const rows = await api.listWorkspaceMembers(company.id)
+      if (generation === memberLoadGeneration.current) setMembers(rows)
+    } catch (reason) {
+      if (generation === memberLoadGeneration.current) {
+        setError(reason instanceof Error ? reason.message : String(reason))
+      }
+    } finally {
+      if (generation === memberLoadGeneration.current) setLoading(false)
+    }
   }, [company.id])
+
+  useEffect(() => {
+    void loadMembers(true)
+    return () => { memberLoadGeneration.current += 1 }
+  }, [loadMembers])
+
+  useEffect(() => ws.on((event) => {
+    if (event.type !== 'workspace.membership' || event.companyId !== company.id) return
+    void loadMembers(false)
+  }), [company.id, loadMembers])
 
   const changeRole = async (member: ApiWorkspaceMember, role: 'member' | 'admin') => {
     if (member.role === role) return
@@ -75,11 +87,8 @@ export function WorkspaceSettingsModal({ company, companyCount, onInvite, onClos
     if (deleteConfirmation !== company.name || deleting || companyCount <= 1) return
     setDeleting(true); setDeleteError(null)
     try {
-      await api.deleteCompany(company.id, deleteConfirmation)
-      const session = await api.authMe()
-      setMe(session.user, session.companies, session.activeCompanyId)
-      setServerCapabilities(session.serverCapabilities)
-      ws.reconnect()
+      const result = await api.deleteCompany(company.id, deleteConfirmation)
+      if (removeCompany(company.id, result.nextCompanyId)) ws.reconnect()
       onClose()
     } catch (reason) {
       setDeleteError(reason instanceof Error ? reason.message : String(reason))

@@ -146,6 +146,8 @@ spec:
         # reachable from the cluster (and pull-secret-able if private).
         - name: CUMORA_AGENT_COMPUTER_IMAGE
           value: "quay.io/yetoneful/cumora-agent-computer:REPLACE-TAG"
+        - name: WORKSPACE_RUNTIME_CLEANUP_ENABLED
+          value: "true"
         # Pull secrets the orchestrator attaches to each agent Pod
         # spec. Comma-separated. Must exist in CUMORA_AGENT_NAMESPACE.
         - name: CUMORA_AGENT_PULL_SECRETS

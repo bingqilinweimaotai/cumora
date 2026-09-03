@@ -44,6 +44,7 @@ interface AuthState {
   setServerCapabilities: (caps: ServerCapabilities) => void
   setActiveCompany: (id: string) => void
   addCompany: (c: AuthCompany) => void
+  removeCompany: (id: string, nextCompanyId: string | null) => boolean
   clear: () => void
   markReady: () => void
 }
@@ -133,6 +134,27 @@ export const useAuth = create<AuthState>((set) => ({
     if (prevId && prevId !== c.id) {
       resetWorkspaceStores()
     }
+  },
+  /** Apply the authoritative result of deleting a workspace immediately.
+   * The realtime bridge still reconciles with /auth/me, but no longer needs
+   * to duplicate the modal's fetch or socket reconnect. */
+  removeCompany(id, nextCompanyId) {
+    const current = useAuth.getState()
+    if (!current.companies.some((company) => company.id === id)) return false
+    const companies = current.companies.filter((company) => company.id !== id)
+    const memberIds = new Set(companies.map((company) => company.id))
+    const resolved = nextCompanyId && memberIds.has(nextCompanyId)
+      ? nextCompanyId
+      : (companies[0]?.id ?? null)
+    if (resolved) localStorage.setItem(COMPANY_KEY, resolved)
+    else localStorage.removeItem(COMPANY_KEY)
+    set((state) => ({
+      companies,
+      activeCompanyId: resolved,
+      contextEpoch: state.contextEpoch + 1,
+    }))
+    resetWorkspaceStores()
+    return true
   },
   clear() {
     localStorage.removeItem(TOKEN_KEY)

@@ -88,6 +88,8 @@ spec:
           value: "http://cumora-server.default.svc.cluster.local:5181/runtime"
         - name: CUMORA_AGENT_NAMESPACE
           value: "default"
+        - name: WORKSPACE_RUNTIME_CLEANUP_ENABLED
+          value: "true"
         # In-cluster PG is also reachable via the service URL above
         # for the agent FUSE driver's HTTP traffic; PG itself lives
         # on the host in dev (host.docker.internal:5432, set in the

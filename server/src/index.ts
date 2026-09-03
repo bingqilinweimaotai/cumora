@@ -35,6 +35,7 @@ import { seedAdmins } from './admin.js'
 import { notifyAlert } from './alerting.js'
 import { startShippingMaintenance } from './shipping-maintenance.js'
 import { startRealtimeOutboxWorker, stopRealtimeOutboxWorker } from './realtime-outbox.js'
+import { startWorkspaceCleanupWorker, stopWorkspaceCleanupWorker } from './workspace-cleanup.js'
 
 async function main() {
   const schemaVersion = await verifySchemaWithBootRetry()
@@ -316,6 +317,7 @@ async function main() {
   // PostgreSQL owns command completion; Redis delivery is retried here after
   // commit. Start after the schema ensure so the outbox table is guaranteed.
   startRealtimeOutboxWorker()
+  startWorkspaceCleanupWorker()
 
   // Agent-pod garbage collection — sweep Succeeded/Failed/Unknown
   // agent pods older than 5min. Plain Pods don't have TTL-after-
@@ -376,6 +378,7 @@ async function main() {
     console.log(`[shutdown] ${sig}`)
     server.close()
     stopRealtimeOutboxWorker()
+    stopWorkspaceCleanupWorker()
     try { await pool.end() } catch { /* ignore */ }
     try { redis.disconnect() } catch { /* ignore */ }
     process.exit(0)

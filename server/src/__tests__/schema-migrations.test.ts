@@ -14,6 +14,7 @@ process.env.OPENAI_API_KEY ??= 'test-key'
 
 const { computedBaselineMigrationChecksum } = await import('../db/migrate.js')
 const { normalizedConversationMembersChecksum } = await import('../db/migrations/0002-normalized-conversation-members.js')
+const { workspaceCleanupJobsChecksum } = await import('../db/migrations/0003-workspace-cleanup-jobs.js')
 const { verifySchemaCompatibility } = await import('../db/schema-version.js')
 type SchemaVersionQueryable = import('../db/schema-version.js').SchemaVersionQueryable
 
@@ -25,6 +26,10 @@ test('the frozen baseline SQL matches its immutable manifest checksum', () => {
 
 test('the normalized membership migration matches its immutable manifest checksum', () => {
   assert.equal(normalizedConversationMembersChecksum(), SCHEMA_MIGRATIONS[1].checksum)
+})
+
+test('the workspace cleanup migration matches its immutable manifest checksum', () => {
+  assert.equal(workspaceCleanupJobsChecksum(), SCHEMA_MIGRATIONS[2].checksum)
 })
 
 test('the migration owner accepts an exact prefix and reports its pending suffix', () => {

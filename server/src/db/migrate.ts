@@ -17,6 +17,10 @@ import {
   NORMALIZED_CONVERSATION_MEMBERS_SQL,
   normalizedConversationMembersChecksum,
 } from './migrations/0002-normalized-conversation-members.js'
+import {
+  WORKSPACE_CLEANUP_JOBS_SQL,
+  workspaceCleanupJobsChecksum,
+} from './migrations/0003-workspace-cleanup-jobs.js'
 
 /** Frozen data backfill embedded in migration 0001. Exported so its behavior
  * can be exercised against PostgreSQL without replaying the whole migration. */
@@ -2094,6 +2098,10 @@ async function applyNormalizedConversationMembers(client: import('pg').PoolClien
   await client.query(NORMALIZED_CONVERSATION_MEMBERS_SQL)
 }
 
+async function applyWorkspaceCleanupJobs(client: import('pg').PoolClient): Promise<void> {
+  await client.query(WORKSPACE_CLEANUP_JOBS_SQL)
+}
+
 const VERSIONED_MIGRATIONS: readonly VersionedMigration[] = [
   {
     ...SCHEMA_MIGRATIONS[0],
@@ -2104,6 +2112,11 @@ const VERSIONED_MIGRATIONS: readonly VersionedMigration[] = [
     ...SCHEMA_MIGRATIONS[1],
     sourceChecksum: normalizedConversationMembersChecksum(),
     up: applyNormalizedConversationMembers,
+  },
+  {
+    ...SCHEMA_MIGRATIONS[2],
+    sourceChecksum: workspaceCleanupJobsChecksum(),
+    up: applyWorkspaceCleanupJobs,
   },
 ]
 
