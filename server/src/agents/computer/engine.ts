@@ -31,6 +31,7 @@ import { basename, dirname, join, delimiter as PATH_DELIMITER } from 'node:path'
 import { StringDecoder } from 'node:string_decoder'
 import { stripLoneSurrogates } from '../text-safety.js'
 import { isCliVersionAtLeast, probeEngineVersion, probeLocalEngineVersion } from './cli-version.js'
+import { discoverEngineModelCatalog, type EngineModelCatalog } from './model-catalog.js'
 
 const IS_WIN = process.platform === 'win32'
 
@@ -525,13 +526,12 @@ export interface EngineClassifyResult {
   model?: string | null
 }
 
-/** A `doctor` liveness probe for ONE brain tier of an engine: spawn it on the
- *  big (default reasoning) model or the small (cheap fast) model with a one-token
- *  prompt. Verifies the binary runs AND its auth/quota is good for that tier,
- *  without doing any real work. Reuses the same one-shot spawn path as triage. */
+/** A `doctor` liveness probe for ONE brain tier of an engine. Doctor has no
+ *  agent/DB context, so its small tier checks only the computer-level fallback,
+ *  not a member-specific fastModel pin. */
 export interface EngineProbeArgs {
-  /** 'big' → engine default model (main brain); 'small' → cheap fast model (the
-   *  cerebellum, e.g. Claude haiku) — the SAME model triage runs on. */
+  /** 'big' → engine default model; 'small' → computer-level cheap/fast
+   *  fallback. Member-specific pins are validated only during real triage. */
   tier: 'big' | 'small'
   /** Neutral temp cwd (no persona). */
   cwd: string
@@ -1049,9 +1049,7 @@ function spawnCapture(
   })
 }
 
-/** The small/fast model the triage path actually runs on. `probe` must use the
- *  SAME one or `doctor` reports a red small-brain for an operator whose custom
- *  provider has no `haiku` — even though their triage is configured correctly. */
+/** The computer-level small/fast model used by standalone probes. */
 function triageModel(fallback: string): string {
   return process.env.CUMORA_TRIAGE_MODEL?.trim() || fallback
 }
@@ -5130,6 +5128,9 @@ export interface DetectedEngineSnapshot {
   /** Why this installed engine will NOT be driven — the reason
    *  evaluateRunnableEngines() produced. Absent on runnable engines. */
   blockedReason?: string
+  /** Account/config-specific model choices discovered by the daemon that owns
+   * this CLI login. Absent on the cheap pairing snapshot and older daemons. */
+  modelCatalog?: EngineModelCatalog
 }
 
 /** Snapshot the installed engines, optionally in a caller-supplied order
@@ -5151,11 +5152,15 @@ export async function snapshotDetectedEngines(ids?: EngineId[]): Promise<Detecte
  *  sitting and waiting on. */
 export async function enrichDetectedEngines(
   snapshot: DetectedEngineSnapshot[],
+  refreshModelCatalog = false,
 ): Promise<DetectedEngineSnapshot[]> {
-  return Promise.all(snapshot.map(async (entry) => ({
-    ...entry,
-    ...await probeEngineVersion(entry.id, entry.path),
-  })))
+  return Promise.all(snapshot.map(async (entry) => {
+    const [version, modelCatalog] = await Promise.all([
+      probeEngineVersion(entry.id, entry.path),
+      discoverEngineModelCatalog(entry.id, entry.path, refreshModelCatalog),
+    ])
+    return { ...entry, ...version, modelCatalog }
+  }))
 }
 
 /** Resolve a bin's absolute path on PATH (the first hit), or null if absent. */

@@ -9,6 +9,39 @@ export type ComputerStatus = 'online' | 'offline' | 'busy'
 /** Engine an agent's host runs it on. 'managed' = Cumora's server-side loop. */
 export type EngineId = 'managed' | 'claude' | 'codex' | 'grok' | 'cursor' | 'opencode' | 'pi' | 'gemini' | 'qwen' | 'antigravity'
 
+export interface EngineModelOption {
+  id: string
+  label: string
+  description?: string | null
+  recommendedFor?: Array<'big' | 'small'>
+}
+
+export interface EngineModelCatalog {
+  models: EngineModelOption[]
+  defaultModel: string | null
+  defaultFastModel: string | null
+  supportsCustom: boolean
+  fastModelScope: 'agent' | 'computer' | 'unsupported'
+  source: 'protocol' | 'cli' | 'presets'
+}
+
+export interface DetectedEngine {
+  id: EngineId
+  bin: string
+  path: string | null
+  /** Installed version on that computer, and the newest one upstream. Null
+   * when the probe found nothing or the daemon predates version reporting. */
+  version?: string | null
+  latest?: string | null
+  outdated?: boolean
+  /** How to update this engine on that computer (vendor updater, brew, or npm). */
+  updateCommand?: string | null
+  /** Set when Cumora refuses to drive an installed engine. */
+  blockedReason?: string | null
+  /** Models visible to the CLI login/config on this specific computer. */
+  modelCatalog?: EngineModelCatalog
+}
+
 export interface Computer {
   id: string
   name: string
@@ -19,22 +52,7 @@ export interface Computer {
   /** Engines installed on THIS computer, as reported by the daemon running on
    *  it. Never a scan of whichever machine is displaying the card — see
    *  server/src/agents/computer/cli-version.ts. */
-  detectedEngines?: Array<{
-    id: EngineId
-    bin: string
-    path: string | null
-    /** Installed version on that computer, and the newest one upstream. Null
-     *  when the probe found nothing or the daemon predates version reporting. */
-    version?: string | null
-    latest?: string | null
-    outdated?: boolean
-    /** How to update this engine on that computer (vendor updater, brew, or npm). */
-    updateCommand?: string | null
-    /** Set when the engine is installed there but Cumora refuses to drive it —
-     *  an old CLI, or a missing sandbox dependency. The daemon knows this and
-     *  now says so, instead of the engine merely going absent. */
-    blockedReason?: string | null
-  }>
+  detectedEngines?: DetectedEngine[]
   enginesDetectedAt?: string | null
   lastSeenAt?: string | null
   pairedAt?: string | null

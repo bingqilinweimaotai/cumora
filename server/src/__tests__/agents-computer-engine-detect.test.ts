@@ -8,6 +8,8 @@ import assert from 'node:assert/strict'
 
 process.env.CUMORA_RUNTIME_CLIENT = 'http'
 process.env.CUMORA_DEFAULT_CLAUDE_MODEL = 'claude-opus-4-7'
+process.env.CUMORA_DEFAULT_GEMINI_MODEL = 'gemini-2.5-pro'
+process.env.CUMORA_DEFAULT_QWEN_MODEL = 'qwen3-coder-plus'
 process.env.CUMORA_DEFAULT_ANTIGRAVITY_MODEL = 'Gemini 3.5 Flash (High)'
 process.env.OPENAI_API_KEY ??= 'test-key'
 
@@ -68,6 +70,8 @@ test('listAgentsForComputer keeps an explicit model and pins CUMORA_DEFAULT_* wh
         { id: 'bram', name: 'Bram', role: 'engineer', systemPrompt: null, engine: 'claude', model: 'stale-pin', fastModel: 'haiku' },
         { id: 'saga', name: 'Saga', role: 'writer', systemPrompt: null, engine: 'claude', model: null, fastModel: null },
         { id: 'aster', name: 'Aster', role: 'reviewer', systemPrompt: null, engine: 'antigravity', model: null, fastModel: null },
+        { id: 'atlas', name: 'Atlas', role: 'analyst', systemPrompt: null, engine: 'gemini', model: null, fastModel: null },
+        { id: 'orion', name: 'Orion', role: 'coder', systemPrompt: null, engine: 'qwen', model: null, fastModel: null },
       ] }
     }
     return { rows: [] }
@@ -79,6 +83,10 @@ test('listAgentsForComputer keeps an explicit model and pins CUMORA_DEFAULT_* wh
   assert.equal(agents[1]?.engine, 'claude')
   assert.equal(agents[2]?.model, 'Gemini 3.5 Flash (High)')
   assert.equal(agents[2]?.engine, 'antigravity')
+  assert.equal(agents[3]?.model, 'gemini-2.5-pro')
+  assert.equal(agents[3]?.engine, 'gemini')
+  assert.equal(agents[4]?.model, 'qwen3-coder-plus')
+  assert.equal(agents[4]?.engine, 'qwen')
 })
 
 test('reportDetectedEngines keeps the previous default first when it is still installed', async () => {
@@ -160,4 +168,41 @@ test('assignAgentToComputer pins when an engine is named and inherits when it is
     agentId: 'bram', companyId: 'co-1', computerId: 'comp-1', inherit: true,
   })
   assert.deepEqual(inherited, { kind: 'local', engine: 'claude', inherit: true })
+})
+
+test('assignAgentToComputer rejects an unavailable explicit pin before mutating the agent', async () => {
+  const calls = installPoolMock(({ sql }) => {
+    if (/SELECT kind, available_engines/.test(sql)) {
+      return { rows: [{ kind: 'local', available_engines: ['claude'] }] }
+    }
+    if (/UPDATE participants SET computer_id/.test(sql)) return { rowCount: 1 }
+    return { rows: [] }
+  })
+  const out = await registry.assignAgentToComputer({
+    agentId: 'bram', companyId: 'co-1', computerId: 'comp-1', engine: 'codex', inherit: false,
+    model: null, fastModel: null,
+  })
+  assert.equal(out, null)
+  assert.equal(calls.some((call) => /UPDATE participants SET computer_id/.test(call.sql)), false)
+})
+
+test('assignAgentToComputer persists model pins in the host assignment update', async () => {
+  const calls = installPoolMock(({ sql }) => {
+    if (/SELECT kind, available_engines/.test(sql)) {
+      return { rows: [{ kind: 'local', available_engines: ['claude', 'codex'] }] }
+    }
+    if (/UPDATE participants SET computer_id/.test(sql)) return { rowCount: 1 }
+    return { rows: [] }
+  })
+  const out = await registry.assignAgentToComputer({
+    agentId: 'bram', companyId: 'co-1', computerId: 'comp-1', engine: 'codex', inherit: false,
+    model: 'gpt-5.6-sol', fastModel: null,
+  })
+  assert.deepEqual(out, { kind: 'local', engine: 'codex', inherit: false })
+  const update = calls.find((call) => /UPDATE participants SET computer_id/.test(call.sql))
+  assert.match(update?.sql ?? '', /model = \$4/)
+  assert.match(update?.sql ?? '', /fast_model = \$5/)
+  assert.deepEqual(update?.params, [
+    'comp-1', 'codex', false, 'gpt-5.6-sol', null, 'bram', 'co-1',
+  ])
 })

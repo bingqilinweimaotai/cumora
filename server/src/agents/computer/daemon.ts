@@ -748,7 +748,7 @@ export function isStaleResumeError(err: string): boolean {
   return STALE_RESUME_RE.test(engineDiagnosticProse(err))
 }
 
-function authFailureHint(engine: EngineId, detail: string): string {
+export function authFailureHint(engine: EngineId, detail: string): string {
   if (CONTEXT_OVERFLOW_RE.test(detail)) {
     return 'The agent filled up its context window. Its session has been reset automatically — just wake the agent again and it will start fresh.'
   }
@@ -760,6 +760,9 @@ function authFailureHint(engine: EngineId, detail: string): string {
   }
   if (engine === 'claude') {
     return 'Open Claude Code on that computer and sign in, refresh quota, or add credits, then wake the agent again.'
+  }
+  if (engine === 'codex') {
+    return 'Open Codex on that computer and refresh its login or quota, then wake the agent again.'
   }
   if (engine === 'grok') {
     return 'Open Grok Build on that computer and run `grok login`, or set XAI_API_KEY, then wake the agent again.'
@@ -773,10 +776,16 @@ function authFailureHint(engine: EngineId, detail: string): string {
   if (engine === 'pi') {
     return 'Open pi on that computer and run `/login` for its provider (or fix the API key / quota), then wake the agent again.'
   }
+  if (engine === 'gemini') {
+    return 'Open Gemini CLI on that computer and run `gemini` to refresh its login, API key, or quota, then wake the agent again.'
+  }
+  if (engine === 'qwen') {
+    return 'Open Qwen Code on that computer and run `qwen` to refresh its login, API key, or quota, then wake the agent again.'
+  }
   if (engine === 'antigravity') {
     return 'Open Antigravity on that computer and run `agy` to refresh its login, model access, or quota, then wake the agent again.'
   }
-  return 'Open Codex on that computer and refresh its login or quota, then wake the agent again.'
+  return 'Check the daemon terminal for details, then wake the agent again.'
 }
 
 function missingEngineMessage(): string {
@@ -1548,6 +1557,17 @@ export function resolveEngineFastModel(
   return override?.trim().toLowerCase() === ENGINE_MODEL_LOCAL ? null : (configured ?? null)
 }
 
+/** Resolve the actual classifier model. A member-specific small brain is more
+ * precise than the legacy computer-wide knob; `local` can still suppress the
+ * member pin through resolveEngineFastModel(). Exported for regression tests. */
+export function resolveTriageModel(
+  configured: string | null | undefined,
+  computerDefault: string | undefined,
+  engineOverride: string | undefined,
+): string | undefined {
+  return resolveEngineFastModel(configured, engineOverride)?.trim() || computerDefault?.trim() || undefined
+}
+
 class AgentRunner {
   /** Aborted once in stop(). Handed to every one-shot `adapter.run(...)` so the
    *  engine child dies with its runner, the way the persistent session already
@@ -1913,6 +1933,14 @@ class AgentRunner {
     return resolveEngineFastModel(this.agent.fastModel, process.env.CUMORA_ENGINE_MODEL)
   }
 
+  /** Per-agent small brain wins over the computer-wide compatibility knob.
+   * This makes participants.fast_model real for every adapter whose classify()
+   * already accepts a model, while preserving CUMORA_TRIAGE_MODEL as a fallback
+   * for old deployments and engines left on their default. */
+  private triageModelPin(): string | undefined {
+    return resolveTriageModel(this.agent.fastModel, process.env.CUMORA_TRIAGE_MODEL, process.env.CUMORA_ENGINE_MODEL)
+  }
+
   private engineEnv(): NodeJS.ProcessEnv {
     return {
       ...process.env,
@@ -2067,8 +2095,9 @@ class AgentRunner {
         cwd: TRIAGE_DIR,
         prompt: `${payload.instructions}\n\n${payload.input}`,
         env: this.engineEnv(),
-        // Engine picks its own cheap default; CUMORA_TRIAGE_MODEL overrides it.
-        model: process.env.CUMORA_TRIAGE_MODEL,
+        // Agent-specific small brain first; computer-wide override second; then
+        // the adapter chooses its own cheap/default model.
+        model: this.triageModelPin(),
         signal: controller.signal,
       })
     } catch (err) {
@@ -2151,17 +2180,21 @@ class AgentRunner {
     }
   }
 
-  /** Triage model id for pricing, honoring CUMORA_TRIAGE_MODEL. Cursor,
-   *  OpenCode and pi have no universal cheap alias, so a reported/pinned stream
+  /** Triage model id for pricing, honoring the agent pin then CUMORA_TRIAGE_MODEL. Cursor,
+   *  OpenCode, pi and Antigravity have no universal cheap alias, so a reported/pinned stream
    *  model wins and the agent model is only a fallback. */
   private triageModel(): string {
-    if (process.env.CUMORA_TRIAGE_MODEL) return process.env.CUMORA_TRIAGE_MODEL
+    const pinned = this.triageModelPin()
+    if (pinned) return pinned
     if (this.adapter.id === 'claude') return 'haiku'
     if (this.adapter.id === 'grok') return 'grok-4.5'
     if (this.adapter.id === 'codex') return 'gpt-5.4-mini'
+    if (this.adapter.id === 'gemini') return 'gemini-2.5-flash-lite'
+    if (this.adapter.id === 'qwen') return 'qwen3-coder-flash'
     if (this.adapter.id === 'opencode') return this.agent.model ?? '<opencode-default>'
     if (this.adapter.id === 'pi') return this.agent.model ?? '<pi-default>'
     if (this.adapter.id === 'antigravity') return this.agent.model ?? '<antigravity-default>'
+    if (this.adapter.id === 'cursor') return this.agent.model ?? '<cursor-default>'
     return this.agent.model ?? '<cursor-default>'
   }
 
@@ -3324,7 +3357,7 @@ async function doRun(serverOverride?: string): Promise<void> {
       const snapshot = await enrichDetectedEngines([
         ...await snapshotDetectedEngines(next),
         ...await blockedSnapshotRows(evaluated.blocked),
-      ])
+      ], forceReport)
       // Report on version drift too, not just install/uninstall — upgrading an
       // engine in place leaves the engine *list* identical, and that is exactly
       // when the card's version line goes stale. The blocked reasons are part

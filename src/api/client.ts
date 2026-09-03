@@ -2,7 +2,7 @@ import { getActiveCompanyId, getAuthToken, useAuth } from '@/stores/auth'
 import type {
   BoardCardComment, BoardCardLookup, BoardSnapshot, BoardSummary,
   CalendarDispatch, CalendarEvent, CalendarEventKind, CalendarEventStatus,
-  CalendarReminderChannel, ComputerKind, ComputerStatus, EngineId,
+  CalendarReminderChannel, ComputerKind, ComputerStatus, DetectedEngine, EngineId,
   Message, RecurrenceRule, Status,
 } from '@/types'
 
@@ -236,7 +236,7 @@ export interface ApiComputer {
   name: string
   kind: ComputerKind
   available_engines: EngineId[]
-  detected_engines?: Array<{ id: EngineId; bin: string; path: string | null }>
+  detected_engines?: DetectedEngine[]
   engines_detected_at?: string | null
   status: ComputerStatus
   last_seen_at: string | null
@@ -992,10 +992,17 @@ export const api = {
     http<{ ok: boolean }>(
       `/computers/${encodeURIComponent(id)}/detect`, { method: 'POST', body: '{}' }),
   /** Move an agent to a computer, choosing its engine (Cumora Cloud = managed). */
-  assignAgentComputer: (agentId: string, computerId: string, engine?: EngineId, inherit?: boolean) =>
+  assignAgentComputer: (
+    agentId: string,
+    computerId: string,
+    engine?: EngineId,
+    inherit?: boolean,
+    model?: string | null,
+    fastModel?: string | null,
+  ) =>
     http<{ ok: boolean; kind: ComputerKind; engine: EngineId; inherit?: boolean }>(
       `/agents/${encodeURIComponent(agentId)}/computer`,
-      { method: 'POST', body: JSON.stringify({ computerId, engine, inherit }) }),
+      { method: 'POST', body: JSON.stringify({ computerId, engine, inherit, model, fastModel }) }),
   createAgent: (input: AgentCreateInput) =>
     http<{
       id: string
