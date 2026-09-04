@@ -4,8 +4,8 @@ import type { Root } from 'mdast'
 import remarkGfm from 'remark-gfm'
 import remarkParse from 'remark-parse'
 import { unified } from 'unified'
-import { firstHttpUrlInMarkdown } from '../../../src/lib/markdownUrls'
-import { remarkCumora } from '../../../src/lib/remarkCumora'
+import { firstHttpUrlInMarkdown } from '../src/lib/markdownUrls'
+import { remarkCumora } from '../src/lib/remarkCumora'
 
 async function parse(markdown: string): Promise<Root> {
   const processor = unified().use(remarkParse).use(remarkGfm).use(remarkCumora)
