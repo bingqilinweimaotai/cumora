@@ -18,7 +18,7 @@ fallback, etc.
 | `werewolf` | Multi-round role-playing with judge-driven state machine. Structural scoring: winner declared + ≥1 phase cycle + death announcements. No semantic quality judging. | ✅ implemented |
 | `kanban` | Pull-group on a pre-created card; success = card moves to done-pattern column AND ≥2 distinct agent contributors. Requires `BENCH_KANBAN_BOARD_ID` pointing at an existing board with todo + done columns. | ✅ implemented |
 
-The two implemented scenarios are **shape-duals** on purpose:
+The chain and counting scenarios are **shape-duals** on purpose:
 chain proves the team adapts to absence (lap when needed);
 counting proves the team respects an explicit cap (don't lap when
 explicitly forbidden). A regression that breaks the principle in either
@@ -66,7 +66,7 @@ export BENCH_USER=u-<your-user-id>          # the participant ID you want to act
 export BENCH_COMPANY=co-<your-company-id>   # the company under which test convos are created
 npx tsx run.ts chain                         # one scenario
 npx tsx run.ts chain counting                # multiple
-npx tsx run.ts --all                         # everything (incl. stubs that always fail)
+npx tsx run.ts --all                         # all four scenarios
 ```
 
 The runner writes one JSON result file per scenario into
@@ -85,11 +85,12 @@ Opus 4.7 on a 7-agent roster (the standard test rig as of 2026-06):
 | `werewolf` | 15-25 min | $15-25 | 2 | $30-50 |
 | `kanban` | 20-30 min | $8-15 | 2 | $16-30 |
 
-**Weekly cycle running all four scenarios: ~$58-101.** Weekly chain
-+ counting only: ~$12-21 (cheap regression watch). Daily all-four:
-$240-400/month (aggressive). Tune `BENCH_*_TRIALS` env vars or
-narrow scenarios on a given schedule to trade statistical confidence
-for cost.
+**One cycle running all four scenarios: ~$58-101.** At a weekly cadence
+that's ~$250-440/month; chain + counting only is ~$12-21 per cycle
+(~$52-91/month — a cheap regression watch). Running all four *daily* is
+~$1,740-3,030/month, which is why the schedule below doesn't. Tune
+`BENCH_*_TRIALS` env vars or narrow scenarios on a given schedule to trade
+statistical confidence for cost.
 
 The default workflow runs `chain counting` only on schedule (the
 cheap pair); use `workflow_dispatch` with an explicit scenario list

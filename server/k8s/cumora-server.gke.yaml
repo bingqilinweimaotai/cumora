@@ -58,6 +58,11 @@ rules:
 - apiGroups: [""]
   resources: ["persistentvolumeclaims"]
   verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+# The orchestrator reads the pre-deployed agent NetworkPolicies before it
+# creates or reuses a Pod. It never grants itself policy mutation rights.
+- apiGroups: ["networking.k8s.io"]
+  resources: ["networkpolicies"]
+  verbs: ["get", "list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -71,9 +76,8 @@ roleRef:
   name: cumora-server-agent-pods
   apiGroup: rbac.authorization.k8s.io
 ---
-# Deployment — 2 replicas by default (wake-bus is Redis-pubsub
-# backed, dedup via SETNX, advisory-locked migrations all make
-# multi-replica safe).
+# Deployment — 2 replicas by default. Database migrations are owned by one
+# pre-deploy Job; application replicas only verify schema compatibility.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -99,18 +103,6 @@ spec:
       #     --docker-username=... --docker-password=...
       imagePullSecrets:
       - name: quay-pull
-      initContainers:
-      - name: migrate
-        # REPLACE with the cumora-server image you pushed to a real
-        # registry. Tag with git sha or semver in prod, NOT :dev.
-        image: quay.io/yetoneful/cumora-server:REPLACE-TAG
-        imagePullPolicy: IfNotPresent
-        command: ["npm", "run", "migrate"]
-        envFrom:
-        - secretRef: { name: cumora }
-        resources:
-          requests: { cpu: "100m", memory: "256Mi" }
-          limits:   { cpu: "500m", memory: "512Mi" }
       containers:
       # Cloud SQL Proxy sidecar — exposes Cloud SQL on 127.0.0.1:5432.
       # Authentication via Workload Identity, no SA key file needed.
@@ -155,25 +147,49 @@ spec:
         # sure the Role above is bound in THAT namespace too.
         - name: CUMORA_AGENT_NAMESPACE
           value: "default"
+        # Namespace containing the trusted server Pods selected by the agent
+        # NetworkPolicy. Keep explicit when agents move to a dedicated ns.
+        - name: CUMORA_AGENT_SERVER_NAMESPACE
+          value: "default"
+        # Pre-deploy server/k8s/cumora-agent-network-policy.yaml in this
+        # namespace. The orchestrator checks its v1 objects and fails closed;
+        # it does not apply policies or infer URL-specific exceptions.
         # Image for agent-computer pods. Must be pushed to a registry
         # reachable from the cluster (and pull-secret-able if private).
         - name: CUMORA_AGENT_COMPUTER_IMAGE
           value: "quay.io/yetoneful/cumora-agent-computer:REPLACE-TAG"
+        - name: WORKSPACE_RUNTIME_CLEANUP_ENABLED
+          value: "true"
         # Pull secrets the orchestrator attaches to each agent Pod
         # spec. Comma-separated. Must exist in CUMORA_AGENT_NAMESPACE.
         - name: CUMORA_AGENT_PULL_SECRETS
           value: "quay-pull"
-        # Optional: pin agent pods to a specific node pool / GKE
-        # Workload Identity SA via CUMORA_AGENT_SERVICE_ACCOUNT
-        # (defaults to namespace `default` SA when unset).
-        # `/` now serves the SPA's index.html, so we point probes at the
-        # DB-touching /api/health instead.
+        # Optional: pin agent Pods to a specific ServiceAccount identity via
+        # CUMORA_AGENT_SERVICE_ACCOUNT. Agent Pod token automount stays off;
+        # that only suppresses the projected Kubernetes token. GCP Workload
+        # Identity/metadata credentials remain a separate runtime/CNI/operator
+        # policy decision.
+        # Startup waits for the schema gate's bounded DB retry budget. Liveness
+        # only checks the process; readiness checks DB reachability and keeps a
+        # booting or degraded pod out of service without killing it.
+        startupProbe:
+          httpGet: { path: /api/livez, port: http }
+          periodSeconds: 5
+          timeoutSeconds: 2
+          failureThreshold: 60
         readinessProbe:
           httpGet: { path: /api/health, port: http }
           periodSeconds: 5
           timeoutSeconds: 2
+          # /api/health races SELECT 1 against 1s, so a saturated (not dead)
+          # Postgres fails a random fraction of probes. Every replica shares
+          # that one DB, so at the default threshold (3 = 15s) they were all
+          # pulled from the NEG together and the LB answered 502 for traffic
+          # the pods could still serve, slowly. 60s of CONSECUTIVE failures
+          # still pulls a pod on a real DB outage; a flap no longer does.
+          failureThreshold: 12
         livenessProbe:
-          httpGet: { path: /api/health, port: http }
+          httpGet: { path: /api/livez, port: http }
           periodSeconds: 30
           timeoutSeconds: 3
         resources:

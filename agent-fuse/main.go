@@ -1,7 +1,12 @@
 // cumora-fuse — a FUSE driver that maps the agent's slice of the
 // `agent_workspace` table to a real filesystem at the mount point.
 //
-//   cumora-fuse "$CUMORA_AGENT_RUNTIME_URL" "$CUMORA_AGENT_RUNTIME_TOKEN" /workspace
+//	cumora-fuse \
+//	  --runtime-base-url "$CUMORA_AGENT_RUNTIME_URL" \
+//	  --mount-point /workspace \
+//	  --token-file /run/cumora/fuse-token \
+//	  --ready-fd 4 --lifetime-fd 5 \
+//	  --log-file /tmp/cumora-fuse.log
 //
 // Instead of connecting to Postgres directly, the FUSE driver issues
 // HTTP requests to the cumora server's `/runtime/fs/*` endpoints.
@@ -126,7 +131,9 @@ func (w *ws) readFile(p string) ([]byte, syscall.Errno) {
 		log.Printf("[cumora-fuse] read(%q) http %d: %s", p, code, truncate(body))
 		return nil, syscall.EIO
 	}
-	var out struct{ Body string `json:"body"` }
+	var out struct {
+		Body string `json:"body"`
+	}
 	if err := json.Unmarshal(body, &out); err != nil {
 		return nil, syscall.EIO
 	}
@@ -172,7 +179,9 @@ func (w *ws) listChildren(dir string) ([]dirent, syscall.Errno) {
 	if code != 200 {
 		return nil, syscall.EIO
 	}
-	var out struct{ Entries []dirent `json:"entries"` }
+	var out struct {
+		Entries []dirent `json:"entries"`
+	}
 	if err := json.Unmarshal(body, &out); err != nil {
 		return nil, syscall.EIO
 	}
@@ -258,10 +267,15 @@ func (d *dirNode) Mkdir(ctx context.Context, name string, mode uint32, out *fuse
 
 func (d *dirNode) Create(ctx context.Context, name string, flags uint32, mode uint32, out *fuse.EntryOut) (*fs.Inode, fs.FileHandle, uint32, syscall.Errno) {
 	child := joinRel(d.relPath, name)
+	// The kernel normally sends CREATE only after Lookup reported ENOENT, so
+	// an existing file is rejected by VFS before this callback for O_EXCL.
+	// The runtime endpoint is an upsert, however; closing the lookup/create
+	// race requires an atomic create-exclusive server operation, not a local
+	// stat-then-write sequence.
 	if errno := d.w.writeFile(child, nil); errno != 0 {
 		return nil, nil, 0, errno
 	}
-	fn := &fileNode{w: d.w, relPath: child, cachedBody: []byte{}, cachedAt: time.Now()}
+	fn := &fileNode{w: d.w, relPath: child, cachedBody: []byte{}, cachedAt: time.Now(), loaded: true}
 	fn.fillAttr(&out.Attr, 0)
 	return d.NewInode(ctx, fn, fs.StableAttr{Mode: fuse.S_IFREG}), &fileHandle{f: fn}, 0, 0
 }
@@ -296,10 +310,27 @@ type fileNode struct {
 	size    int64
 
 	mu         sync.Mutex
+	flushMu    sync.Mutex
 	cachedBody []byte
 	cachedAt   time.Time
+	loaded     bool
 	dirty      bool
+	generation uint64
 }
+
+// The server stores a whole-file body in a single JSON PUT bounded at 34 MB
+// (`json({ limit: '34mb' })`, server/src/agents/runtime/fs-endpoints.ts), so a
+// body above that can never be written durably. Refusing it here turns a
+// guaranteed EIO at flush -- long after the agent believed the write landed --
+// into an immediate EFBIG at the syscall that asked for it.
+//
+// It also, and more urgently, bounds the allocation. The previous guards only
+// rejected sizes above maxInt, so `truncate -s 1000000000000000000` reached
+// `make([]byte, 1e18)` and panicked with "makeslice: len out of range". go-fuse
+// v2.5.1 has no recover() in its request path, so that panic killed the daemon:
+// /workspace then returned ENOTCONN for the life of the pod and every unflushed
+// dirty file in the process died with it.
+const maxFileBytes = 32 * 1024 * 1024
 
 func (f *fileNode) fillAttr(a *fuse.Attr, size int64) {
 	a.Mode = fuse.S_IFREG | 0o644
@@ -308,19 +339,36 @@ func (f *fileNode) fillAttr(a *fuse.Attr, size int64) {
 	a.Size = uint64(size)
 }
 
-func (f *fileNode) loadIfStale() ([]byte, syscall.Errno) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if !f.dirty && time.Since(f.cachedAt) < fileCacheTTL {
-		return f.cachedBody, 0
+// ensureCurrentLocked hydrates the cache when it is uncached or stale. The
+// caller must hold f.mu. Keeping the HTTP read under the same lock as cache
+// updates means a partial write cannot race hydration and apply to the wrong
+// base. It deliberately does not clone the body; write callers mutate the
+// cache while snapshot-returning callers clone it below.
+func (f *fileNode) ensureCurrentLocked() syscall.Errno {
+	// A dirty cache is authoritative until its snapshot has been uploaded. Its
+	// TTL must not cause an in-flight local edit to be replaced by remote data.
+	if f.dirty || (f.loaded && time.Since(f.cachedAt) < fileCacheTTL) {
+		return 0
 	}
 	body, errno := f.w.readFile(f.relPath)
 	if errno != 0 {
-		return nil, errno
+		return errno
 	}
 	f.cachedBody = body
 	f.cachedAt = time.Now()
-	return body, 0
+	f.loaded = true
+	return 0
+}
+
+func (f *fileNode) loadIfStale() ([]byte, syscall.Errno) {
+	f.mu.Lock()
+	errno := f.ensureCurrentLocked()
+	var body []byte
+	if errno == 0 {
+		body = bytes.Clone(f.cachedBody)
+	}
+	f.mu.Unlock()
+	return body, errno
 }
 
 func (f *fileNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
@@ -341,6 +389,9 @@ func (f *fileNode) Read(ctx context.Context, fh fs.FileHandle, dest []byte, off 
 	if errno != 0 {
 		return nil, errno
 	}
+	if off < 0 {
+		return nil, syscall.EINVAL
+	}
 	end := off + int64(len(dest))
 	if end > int64(len(body)) {
 		end = int64(len(body))
@@ -354,6 +405,20 @@ func (f *fileNode) Read(ctx context.Context, fh fs.FileHandle, dest []byte, off 
 func (f *fileNode) Write(ctx context.Context, fh fs.FileHandle, data []byte, off int64) (uint32, syscall.Errno) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if off < 0 {
+		return 0, syscall.EINVAL
+	}
+	// Both halves are needed: testing only the offset would compute
+	// `maxFileBytes-len(data)` negative for an oversized payload and wrap it to
+	// a huge uint64, letting the very allocation this guards slip through.
+	if len(data) > maxFileBytes || uint64(off) > uint64(maxFileBytes-len(data)) {
+		return 0, syscall.EFBIG
+	}
+	// Bound the request before hydrating: a doomed write should not also cost
+	// a remote read.
+	if errno := f.ensureCurrentLocked(); errno != 0 {
+		return 0, errno
+	}
 	need := int(off) + len(data)
 	if need > len(f.cachedBody) {
 		grown := make([]byte, need)
@@ -362,6 +427,7 @@ func (f *fileNode) Write(ctx context.Context, fh fs.FileHandle, data []byte, off
 	}
 	copy(f.cachedBody[off:], data)
 	f.dirty = true
+	f.generation++
 	return uint32(len(data)), 0
 }
 
@@ -374,40 +440,84 @@ func (f *fileNode) Fsync(ctx context.Context, fh fs.FileHandle, flags uint32) sy
 }
 
 func (f *fileNode) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
-	if size, ok := in.GetSize(); ok {
-		f.mu.Lock()
+	size, resizing := in.GetSize()
+	// Bound before hydrating, so an impossible size costs neither a remote read
+	// nor an allocation.
+	if resizing && size > maxFileBytes {
+		return syscall.EFBIG
+	}
+
+	f.mu.Lock()
+	if errno := f.ensureCurrentLocked(); errno != 0 {
+		f.mu.Unlock()
+		return errno
+	}
+	if resizing {
 		if int(size) < len(f.cachedBody) {
-			f.cachedBody = f.cachedBody[:size]
+			f.cachedBody = f.cachedBody[:int(size)]
 		} else if int(size) > len(f.cachedBody) {
 			grown := make([]byte, size)
 			copy(grown, f.cachedBody)
 			f.cachedBody = grown
 		}
 		f.dirty = true
-		f.mu.Unlock()
+		f.generation++
 	}
-	body, errno := f.loadIfStale()
-	if errno != 0 {
-		return errno
+	body := bytes.Clone(f.cachedBody)
+	f.mu.Unlock()
+
+	// A resize that arrives with NO file handle is a path-based truncate(2):
+	// the kernel opened nothing, so it will send neither FLUSH nor RELEASE for
+	// it and persist() would never run -- `truncate -s 5 f` reported success,
+	// reported the new size, and left the stored file untouched forever.
+	//
+	// An ftruncate(2) through an fd does carry a handle, and the kernel emits
+	// FLUSH on every close(2) of that fd -- including the closes it performs
+	// when a process is killed -- so that path keeps batching into the existing
+	// flush rather than paying a second upload. This is the only resize the
+	// kernel will never come back for, so it is the only one we push eagerly.
+	if resizing && fh == nil {
+		if errno := f.persist(); errno != 0 {
+			// persist() leaves the node dirty, so a later open+flush can still
+			// retry; the caller learns now rather than believing a lost write.
+			return errno
+		}
 	}
+
 	f.fillAttr(&out.Attr, int64(len(body)))
 	return 0
 }
 
 func (f *fileNode) persist() syscall.Errno {
+	// FUSE can issue overlapping Flush/Fsync callbacks. Serialize the remote
+	// whole-file writes so an older request cannot complete after a newer one.
+	f.flushMu.Lock()
+	defer f.flushMu.Unlock()
+
 	f.mu.Lock()
-	dirty := f.dirty
-	body := append([]byte(nil), f.cachedBody...)
-	f.mu.Unlock()
-	if !dirty {
+	if !f.dirty {
+		f.mu.Unlock()
 		return 0
 	}
+	body := bytes.Clone(f.cachedBody)
+	generation := f.generation
+	f.mu.Unlock()
+
 	if errno := f.w.writeFile(f.relPath, body); errno != 0 {
+		// Keep dirty=true on network or HTTP failures. The next Flush/Fsync
+		// can retry the same local snapshot.
 		return errno
 	}
+
 	f.mu.Lock()
-	f.dirty = false
-	f.cachedAt = time.Now()
+	if f.generation == generation {
+		f.dirty = false
+		f.cachedAt = time.Now()
+		f.loaded = true
+	}
+	// A write may have raced the upload. Leave that newer generation dirty;
+	// the next Flush/Fsync will upload it without letting this older response
+	// clear the local change.
 	f.mu.Unlock()
 	return 0
 }
@@ -428,18 +538,41 @@ func joinRel(parent, name string) string {
 // ─── main ──────────────────────────────────────────────────────────
 
 func main() {
-	if len(os.Args) != 4 {
-		fmt.Fprintln(os.Stderr, "usage: cumora-fuse <runtime-base-url> <bearer-token> <mount-point>")
+	cfg, err := parseRuntimeConfig(os.Args[1:])
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cumora-fuse: %v\n", err)
 		os.Exit(2)
 	}
-	baseURL := os.Args[1]
-	token := os.Args[2]
-	mountPoint := os.Args[3]
 
-	w := newWs(baseURL, token)
+	var fuseLogFile *os.File
+	if cfg.logFile != "" {
+		fuseLogFile, err = openSecureLogFile(cfg.logFile)
+		if err != nil {
+			log.Fatalf("open FUSE log: %v", err)
+		}
+		defer fuseLogFile.Close()
+		log.SetOutput(fuseLogFile)
+	}
+
+	token, err := readRootOnlyToken(cfg.tokenFile)
+	if err != nil {
+		log.Fatalf("read FUSE token: %v", err)
+	}
+	readyFD, lifetimeFD, err := prepareNotifierFDs(cfg.readyFD, cfg.lifetimeFD)
+	if err != nil {
+		log.Fatalf("prepare readiness/lifetime FDs: %v", err)
+	}
+	// Keep the lifetime writer open until this process exits. The bootstrap
+	// owns the reader and uses EOF as an unambiguous process-lifetime signal;
+	// CloseOnExec is set by prepareNotifierFDs so a fusermount helper cannot
+	// accidentally keep that pipe open.
+	defer lifetimeFD.Close()
+
+	parentPID := os.Getppid()
+	w := newWs(cfg.baseURL, token)
 	// Probe once so we fail fast if the URL is wrong.
 	if _, errno := w.stat(""); errno != 0 {
-		log.Fatalf("[cumora-fuse] sanity-stat failed: errno=%d (is %s reachable?)", errno, baseURL)
+		log.Fatalf("[cumora-fuse] sanity-stat failed: errno=%d (is %s reachable?)", errno, cfg.baseURL)
 	}
 
 	root := &dirNode{w: w, relPath: ""}
@@ -448,21 +581,30 @@ func main() {
 		MountOptions: fuse.MountOptions{
 			Name:          "cumora-workspace",
 			FsName:        "cumora-workspace",
-			AllowOther:    false,
+			AllowOther:    true,
+			Options:       []string{"default_permissions"},
 			DisableXAttrs: true,
 			Debug:         os.Getenv("CUMORA_FUSE_DEBUG") == "1",
 			DirectMount:   false,
 		},
+		UID:             modelUID,
+		GID:             modelGID,
 		EntryTimeout:    durptr(0),
 		AttrTimeout:     durptr(0),
 		NegativeTimeout: durptr(0),
 	}
 
-	srv, err := fs.Mount(mountPoint, root, opts)
+	srv, err := fs.Mount(cfg.mountPoint, root, opts)
 	if err != nil {
-		log.Fatalf("[cumora-fuse] mount %q: %v", mountPoint, err)
+		log.Fatalf("[cumora-fuse] mount %q: %v", cfg.mountPoint, err)
 	}
-	log.Printf("[cumora-fuse] mounted at %s (backend %s)", mountPoint, baseURL)
+	if err := demoteAfterMount(parentPID); err != nil {
+		log.Fatalf("[cumora-fuse] privilege drop failed after mount: %v", err)
+	}
+	if err := writeReadyMarker(readyFD); err != nil {
+		log.Fatalf("[cumora-fuse] readiness marker failed: %v", err)
+	}
+	log.Printf("[cumora-fuse] mounted at %s (backend %s)", cfg.mountPoint, cfg.baseURL)
 
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGTERM, syscall.SIGINT)
@@ -473,14 +615,18 @@ func main() {
 		// Unmount() ends up blocking on a stuck in-flight request.
 		// go-fuse's Wait() is documented to return after Unmount, but
 		// in practice we've seen it stall waiting on the IO loop. The
-		// kernel mount goes away the moment Unmount returns; once it
-		// does there's nothing useful left to do, so just leave.
+		// A successful Unmount removes the kernel mount. After a demoted
+		// daemon, EPERM is possible; container namespace teardown remains
+		// responsible for reclaiming the mount in that case.
 		time.AfterFunc(3*time.Second, func() {
-			log.Printf("[cumora-fuse] grace period elapsed, exit 0")
+			log.Printf("[cumora-fuse] grace period elapsed; exiting; container namespace teardown is required")
 			os.Exit(0)
 		})
 		if err := srv.Unmount(); err != nil {
-			log.Printf("[cumora-fuse] unmount error: %v", err)
+			// After the daemon has dropped CAP_SYS_ADMIN, EPERM is expected
+			// on the container stop path. The parent/container teardown owns
+			// final mount-namespace cleanup; do not claim that unmount worked.
+			log.Printf("[cumora-fuse] unmount error (namespace teardown may be required): %v", err)
 		}
 	}()
 

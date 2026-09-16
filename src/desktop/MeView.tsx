@@ -784,11 +784,12 @@ type AgentRow = {
   latest?: string | null
   outdated?: boolean
   updateCommand?: string | null
+  blockedReason?: string | null
 }
 
 const CLI_ORDER = [
   'claude', 'cursor', 'codex', 'grok', 'opencode',
-  'pi', 'gemini', 'qwen', 'hermes',
+  'pi', 'gemini', 'qwen', 'zcode', 'hermes',
 ]
 
 const COMPUTER_STATUS_KEY: Record<string, MessageKey> = {
@@ -857,6 +858,41 @@ function ComputersTab() {
   const [repairCopied, setRepairCopied] = useState(false)
   const [busyId, setBusyId] = useState<string | null>(null)
   const [copiedCli, setCopiedCli] = useState<string | null>(null)
+  // Engine model defaults editing: which computer+engine is being edited
+  const [editingModel, setEditingModel] = useState<{ computerId: string; engineId: string } | null>(null)
+  const [modelInput, setModelInput] = useState('')
+  const [fastModelInput, setFastModelInput] = useState('')
+  const [savingModel, setSavingModel] = useState(false)
+
+  const saveEngineDefaults = async (computerId: string, engineId: string) => {
+    const savedEditor = editingModel
+    setSavingModel(true)
+    setErr(null)
+    try {
+      const defaults = {
+        [engineId]: {
+          model: modelInput.trim() || null,
+          fastModel: fastModelInput.trim() || null,
+        },
+      }
+      await api.updateEngineDefaults(computerId, defaults)
+      await useComputers.getState().refresh()
+      // A late response must not close a different editing session.
+      setEditingModel((current) => current === savedEditor ? null : current)
+    } catch (e) {
+      console.warn('[engine-defaults] save failed', e)
+      setErr(e instanceof Error ? e.message : String(e))
+    } finally {
+      setSavingModel(false)
+    }
+  }
+
+  const startEditModel = (computerId: string, engineId: string, currentModel?: string | null, currentFastModel?: string | null) => {
+    setEditingModel({ computerId, engineId })
+    setModelInput(currentModel ?? '')
+    setFastModelInput(currentFastModel ?? '')
+  }
+
   useEffect(() => {
     void useComputers.getState().refresh()
   }, [])
@@ -960,80 +996,104 @@ function ComputersTab() {
             const repairCmd = repairCode ? `npx cumora@latest agent computer --pair ${repairCode}${serverFlag}` : ''
             const rows = repairable ? pairedRows(c) : []
             const detecting = busyId === c.id
+            // Extracted so the header can be wrapped in either a plain
+            // container or a real toggle control without duplicating it.
+            const headerBody = (
+              <>
+                    <div className="text-[22px] w-8 text-center">{KIND_ICON[c.kind] ?? '🖥'}</div>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="font-display font-medium text-[16px] text-ink-900">{c.name}</span>
+                        <span className="inline-flex items-center gap-1.5 text-[11px] text-ink-500">
+                          <span className="w-2 h-2 rounded-full" style={{ background: STATUS_COLOR[c.status] ?? 'var(--ink-300)' }} />
+                          {t(COMPUTER_STATUS_KEY[c.status] ?? 'me.computerStatus.offline')}
+                        </span>
+                        {c.daemonOutdated && (
+                          <span className="inline-flex items-center gap-1 text-[10.5px] font-semibold px-2 py-0.5 rounded-full"
+                            style={{ background: 'rgba(244,183,64,0.18)', color: 'var(--gold-deep)' }}
+                            title={c.latestDaemonVersion ? t('me.updateToVersion', { version: c.latestDaemonVersion }) : t('me.updateAvailableTitle')}>
+                            ↑ {t('me.updateAvailableShort')}{c.daemonVersion ? ` · ${t('me.daemonVersion', { version: c.daemonVersion })}` : ''}
+                          </span>
+                        )}
+                      </div>
+                      <div className="flex items-center text-[12px] text-ink-500 mt-0.5">
+                        {repairable
+                          ? (
+                            <>
+                              <span>
+                                {rows.length > 0
+                                  ? (rows.length === 1 ? t('me.agentsCliDetectedOne', { n: rows.length }) : t('me.agentsCliDetectedOther', { n: rows.length }))
+                                  : (n === 1 ? t('me.agentsCountOne', { n }) : t('me.agentsCountOther', { n }))}
+                              </span>
+                              {c.daemonVersion && (
+                                <>
+                                  <span className="shrink-0 text-ink-300" style={{ marginLeft: 10, marginRight: 10 }}>·</span>
+                                  <span>{t('me.daemonVersionLocal', { version: c.daemonVersion })}</span>
+                                </>
+                              )}
+                            </>
+                          )
+                          : (
+                            <>
+                              {c.availableEngines.map((e) => ENGINE_LABEL[e] ?? e).join(', ') || '—'}
+                              {' · '}{n === 1 ? t('me.agentsCountOne', { n }) : t('me.agentsCountOther', { n })}
+                            </>
+                          )}
+                      </div>
+                    </div>
+                    {repairable && (
+                      <>
+                        <button type="button" disabled={detecting} onClick={(e) => { e.stopPropagation(); void refreshEngines(c.id) }}
+                          className="text-[12px] font-semibold text-skype-deep disabled:opacity-45 px-2 py-1">
+                          {detecting ? t('me.agentsRefreshing') : t('me.agentsRefresh')}
+                        </button>
+                        {/* Was a bare span riding the header's onClick. The header
+                            now opens the engine list, so reconnect needs its own
+                            handler — and must not also toggle the list. */}
+                        <button type="button" onClick={(e) => { e.stopPropagation(); void toggleRepair(c.id) }}
+                          className="text-[12px] font-semibold text-skype-deep px-2 py-1">
+                          {expanded ? t('me.hideAction') : t('me.reconnect')}
+                        </button>
+                        <button type="button" onClick={(e) => { e.stopPropagation(); void remove(c.id, c.name) }}
+                          className="text-[12px] font-semibold text-coral-deep hover:underline px-2 py-1">
+                          {t('me.remove')}
+                        </button>
+                        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+                          strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"
+                          className="text-ink-300 shrink-0 transition-transform"
+                          style={{ transform: enginesShown ? 'rotate(180deg)' : 'none' }}>
+                          <path d="M6 9l6 6 6-6" />
+                        </svg>
+                      </>
+                    )}
+              </>
+            )
+            // A card whose engine list can be opened IS a disclosure control,
+            // so it carries the role, a focus stop, the expanded state and a
+            // keyboard path. Written as two branches rather than one element
+            // with a conditional role: a role the linter cannot resolve reads
+            // as a plain div, which is how the aria-expanded here came to be
+            // dropped in #129. Cloud cards toggle nothing and stay inert.
+            const header = repairable ? (
+              <div
+                className="p-4 flex items-center gap-4 rounded-[14px] cursor-pointer hover:bg-sky2-50"
+                role="button"
+                tabIndex={0}
+                aria-expanded={enginesShown}
+                onClick={() => toggleEngines(c.id)}
+                onKeyDown={(e) => {
+                  if (e.key !== 'Enter' && e.key !== ' ') return
+                  e.preventDefault()
+                  toggleEngines(c.id)
+                }}>
+                {headerBody}
+              </div>
+            ) : (
+              <div className="p-4 flex items-center gap-4 rounded-[14px]">{headerBody}</div>
+            )
             return (
               <div key={c.id} className="bg-cloud rounded-[14px]" style={{ border: '1px solid var(--ink-100)' }}>
-                <div
-                  className={cn('p-4 flex items-center gap-4 rounded-[14px]', repairable && 'cursor-pointer hover:bg-sky2-50')}
-                  onClick={repairable ? () => toggleEngines(c.id) : undefined}
-                  role={repairable ? 'button' : undefined}
-                  aria-expanded={repairable ? enginesShown : undefined}>
-                  <div className="text-[22px] w-8 text-center">{KIND_ICON[c.kind] ?? '🖥'}</div>
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2">
-                      <span className="font-display font-medium text-[16px] text-ink-900">{c.name}</span>
-                      <span className="inline-flex items-center gap-1.5 text-[11px] text-ink-500">
-                        <span className="w-2 h-2 rounded-full" style={{ background: STATUS_COLOR[c.status] ?? 'var(--ink-300)' }} />
-                        {t(COMPUTER_STATUS_KEY[c.status] ?? 'me.computerStatus.offline')}
-                      </span>
-                      {c.daemonOutdated && (
-                        <span className="inline-flex items-center gap-1 text-[10.5px] font-semibold px-2 py-0.5 rounded-full"
-                          style={{ background: 'rgba(244,183,64,0.18)', color: 'var(--gold-deep)' }}
-                          title={c.latestDaemonVersion ? t('me.updateToVersion', { version: c.latestDaemonVersion }) : t('me.updateAvailableTitle')}>
-                          ↑ {t('me.updateAvailableShort')}{c.daemonVersion ? ` · ${t('me.daemonVersion', { version: c.daemonVersion })}` : ''}
-                        </span>
-                      )}
-                    </div>
-                    <div className="flex items-center text-[12px] text-ink-500 mt-0.5">
-                      {repairable
-                        ? (
-                          <>
-                            <span>
-                              {rows.length > 0
-                                ? (rows.length === 1 ? t('me.agentsCliDetectedOne', { n: rows.length }) : t('me.agentsCliDetectedOther', { n: rows.length }))
-                                : (n === 1 ? t('me.agentsCountOne', { n }) : t('me.agentsCountOther', { n }))}
-                            </span>
-                            {c.daemonVersion && (
-                              <>
-                                <span className="shrink-0 text-ink-300" style={{ marginLeft: 10, marginRight: 10 }}>·</span>
-                                <span>{t('me.daemonVersionLocal', { version: c.daemonVersion })}</span>
-                              </>
-                            )}
-                          </>
-                        )
-                        : (
-                          <>
-                            {c.availableEngines.map((e) => ENGINE_LABEL[e] ?? e).join(', ') || '—'}
-                            {' · '}{n === 1 ? t('me.agentsCountOne', { n }) : t('me.agentsCountOther', { n })}
-                          </>
-                        )}
-                    </div>
-                  </div>
-                  {repairable && (
-                    <>
-                      <button type="button" disabled={detecting} onClick={(e) => { e.stopPropagation(); void refreshEngines(c.id) }}
-                        className="text-[12px] font-semibold text-skype-deep disabled:opacity-45 px-2 py-1">
-                        {detecting ? t('me.agentsRefreshing') : t('me.agentsRefresh')}
-                      </button>
-                      {/* Was a bare span riding the header's onClick. The header
-                          now opens the engine list, so reconnect needs its own
-                          handler — and must not also toggle the list. */}
-                      <button type="button" onClick={(e) => { e.stopPropagation(); void toggleRepair(c.id) }}
-                        className="text-[12px] font-semibold text-skype-deep px-2 py-1">
-                        {expanded ? t('me.hideAction') : t('me.reconnect')}
-                      </button>
-                      <button type="button" onClick={(e) => { e.stopPropagation(); void remove(c.id, c.name) }}
-                        className="text-[12px] font-semibold text-coral-deep hover:underline px-2 py-1">
-                        {t('me.remove')}
-                      </button>
-                      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
-                        strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"
-                        className="text-ink-300 shrink-0 transition-transform"
-                        style={{ transform: enginesShown ? 'rotate(180deg)' : 'none' }}>
-                        <path d="M6 9l6 6 6-6" />
-                      </svg>
-                    </>
-                  )}
-                </div>
+                {header}
                 {repairable && enginesShown && (
                   rows.length === 0 ? (
                     <div className="px-4 pb-4 text-[12px] text-ink-400">{t('me.agentsNoEngines')}</div>
@@ -1056,10 +1116,25 @@ function ComputersTab() {
                                       {t('me.agentsCliUpdateAvailable')}
                                     </span>
                                   )}
-                                  {!engineId && (
+                                  {/* Two different things, deliberately not one
+                                      label: "not runnable" means Cumora has no
+                                      adapter for this CLI and the operator can
+                                      do nothing about it, while "blocked" means
+                                      it is supported but was refused here for a
+                                      reason they can act on. */}
+                                  {row.blockedReason ? (
+                                    <span className="text-[12px] font-semibold px-2 py-0.5 rounded-full shrink-0 bg-coral-soft text-coral-deep">
+                                      {t('me.agentsCliBlocked')}
+                                    </span>
+                                  ) : !engineId && (
                                     <span className="text-[12px] text-ink-400 truncate">{t('me.agentsNotRunnable')}</span>
                                   )}
                                 </div>
+                                {row.blockedReason && (
+                                  <div className="mt-1 text-[12px] leading-[1.55] text-coral-deep">
+                                    {t('me.agentsCliBlockedReason', { reason: row.blockedReason })}
+                                  </div>
+                                )}
                                 <div className="mt-1 flex items-center min-w-0 font-mono text-[12px] text-ink-400">
                                   <span className="shrink-0">{row.bin}</span>
                                   {row.path && (
@@ -1112,6 +1187,102 @@ function ComputersTab() {
                                 </div>
                               </div>
                             )}
+                            {/* Engine model configuration */}
+                            {engineId && (
+                              <div className="mt-3 pt-3" style={{ borderTop: '1px dashed var(--ink-100)' }}>
+                                {editingModel?.computerId === c.id && editingModel?.engineId === row.id ? (
+                                  <div className="space-y-2">
+                                    <div className="text-[11px] font-semibold text-ink-600 uppercase tracking-wider">
+                                      {t('me.engineModelConfig', { engine: engineLabel(row.id) })}
+                                    </div>
+                                    <div>
+                                      <label className="block text-[11px] text-ink-500 mb-1">{t('me.engineDefaultModel')}</label>
+                                      <input
+                                        type="text"
+                                        value={modelInput}
+                                        disabled={savingModel}
+                                        onChange={(e) => setModelInput(e.target.value)}
+                                        placeholder={t('me.engineModelPlaceholder')}
+                                        className="w-full px-2 py-1.5 text-[12px] rounded-[8px] font-mono"
+                                        style={{ border: '1px solid var(--ink-100)', background: 'var(--paper)' }}
+                                      />
+                                    </div>
+                                    <div>
+                                      <label className="block text-[11px] text-ink-500 mb-1">{t('me.engineFastModel')}</label>
+                                      <input
+                                        type="text"
+                                        value={fastModelInput}
+                                        disabled={savingModel}
+                                        onChange={(e) => setFastModelInput(e.target.value)}
+                                        placeholder={t('me.engineFastModelPlaceholder')}
+                                        className="w-full px-2 py-1.5 text-[12px] rounded-[8px] font-mono"
+                                        style={{ border: '1px solid var(--ink-100)', background: 'var(--paper)' }}
+                                      />
+                                    </div>
+                                    <p className="text-[11px] text-ink-500">{t('me.engineModelHelp')}</p>
+                                    <div className="flex gap-2">
+                                      <button
+                                        type="button"
+                                        onClick={() => saveEngineDefaults(c.id, row.id)}
+                                        disabled={savingModel}
+                                        className="px-3 py-1 rounded-[7px] text-[11px] font-semibold text-white disabled:opacity-50"
+                                        style={{ background: 'var(--skype)' }}
+                                      >
+                                        {savingModel ? t('common.saving') : t('common.save')}
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => setEditingModel(null)}
+                                        className="px-3 py-1 rounded-[7px] text-[11px] font-semibold text-ink-600 hover:bg-ink-50"
+                                      >
+                                        {t('common.cancel')}
+                                      </button>
+                                    </div>
+                                  </div>
+                                ) : (
+                                  <div className="flex items-center justify-between gap-3">
+                                    <div className="min-w-0">
+                                      {(() => {
+                                        const def = c.engineDefaults?.[engineId]
+                                        const main = def?.model?.trim()
+                                        const fast = def?.fastModel?.trim()
+                                        if (!main && !fast) {
+                                          return <span className="text-[11px] text-ink-400">{t('me.engineModelNotSet')}</span>
+                                        }
+                                        return (
+                                          <div className="flex items-center gap-2 flex-wrap">
+                                            {main && (
+                                              <span className="inline-flex items-center gap-1 rounded-[6px] px-1.5 py-0.5 font-mono text-[10.5px] text-ink-700"
+                                                style={{ background: 'var(--ink-100)' }}>
+                                                {main}
+                                              </span>
+                                            )}
+                                            {fast && (
+                                              <span className="inline-flex items-center gap-1 rounded-[6px] px-1.5 py-0.5 font-mono text-[10.5px] text-ink-500"
+                                                style={{ background: 'var(--sky2-100)' }}>
+                                                fast: {fast}
+                                              </span>
+                                            )}
+                                          </div>
+                                        )
+                                      })()}
+                                    </div>
+                                    <button
+                                      type="button"
+                                      onClick={() => startEditModel(
+                                        c.id,
+                                        row.id,
+                                        c.engineDefaults?.[engineId]?.model,
+                                        c.engineDefaults?.[engineId]?.fastModel
+                                      )}
+                                      className="shrink-0 text-[11px] font-semibold text-skype-deep hover:underline"
+                                    >
+                                      {t('me.engineModelConfigure')}
+                                    </button>
+                                  </div>
+                                )}
+                              </div>
+                            )}
                           </div>
                         )
                       })}
@@ -1149,20 +1320,24 @@ function ComputersTab() {
             </div>
             {/* biome-ignore lint/security/noDangerouslySetInnerHtml: static copy from the locale bundle, not user input */}
             <div className="text-[11.5px] text-ink-500 mb-2.5 italic font-display" dangerouslySetInnerHTML={{ __html: t('me.engineRequired') }} />
-            <div className="flex items-center gap-2.5 mb-2.5">
-              <span className="text-[12px] text-ink-500">{t('me.engineLabel')}</span>
-              <div className="inline-flex rounded-[9px] p-0.5" style={{ background: 'var(--ink-100)' }}>
-                {RUNNABLE_ENGINES.map((id) => (
-                  <button key={id} type="button" onClick={() => setEngine(id)}
-                    className="px-3 py-1 rounded-[7px] text-[12px] font-semibold transition-colors duration-150"
-                    style={engine === id
-                      ? { background: 'var(--paper)', color: 'var(--ink-900)', boxShadow: '0 1px 2px rgba(0,0,0,0.08)' }
-                      : { color: 'var(--ink-500)' }}>
-                    {engineLabel(id)}
-                  </button>
-                ))}
+            <div className="mb-2.5">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <span className="text-[12px] text-ink-500 shrink-0">{t('me.engineLabel')}</span>
+                <div className="flex-1 min-w-0 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+                  <div className="inline-flex min-w-max rounded-[9px] p-0.5" style={{ background: 'var(--ink-100)' }}>
+                    {RUNNABLE_ENGINES.map((id) => (
+                      <button key={id} type="button" onClick={() => setEngine(id)}
+                        className="shrink-0 whitespace-nowrap px-3 py-1 rounded-[7px] text-[12px] font-semibold transition-colors duration-150"
+                        style={engine === id
+                          ? { background: 'var(--paper)', color: 'var(--ink-900)', boxShadow: '0 1px 2px rgba(0,0,0,0.08)' }
+                          : { color: 'var(--ink-500)' }}>
+                        {engineLabel(id)}
+                      </button>
+                    ))}
+                  </div>
+                </div>
               </div>
-              <span className="text-[11px] text-ink-400">{t('me.engineDefaultHint')}</span>
+              <div className="mt-1.5 text-[11px] leading-relaxed text-ink-400">{t('me.engineDefaultHint')}</div>
             </div>
             <label className="flex items-start gap-2 mb-2.5 cursor-pointer select-none">
               <input type="checkbox" checked={asService} onChange={(e) => setAsService(e.target.checked)} className="mt-[3px]" />

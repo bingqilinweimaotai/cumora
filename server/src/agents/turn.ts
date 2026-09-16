@@ -1723,8 +1723,36 @@ export async function runAgentTurn(agentId: string, options: AgentTurnOptions = 
     if (failureNoticePosted || inbox.length === 0) return
     failureNoticePosted = true
     const uniqueConvoIds = [...new Set(inbox.map((m) => m.conversation_id))]
+    // "No result was produced" has to be true where it is posted. A turn can
+    // answer in hop 3 and then die at MAX_HOPS or the token ceiling in hop 40;
+    // the room already has the reply, and a red failure line directly under it
+    // says the opposite of what the user can see.
+    //
+    // Fix the SENTENCE, not the notice. Suppressing it outright would silence
+    // the announce-then-die case, which is drawn from the same population: the
+    // rules mandate an intent message before long work (see the operating rules
+    // below), and long multi-hop turns are exactly the ones that reach MAX_HOPS
+    // or the token ceiling. There the room would get "Drafting the summary now."
+    // and then nothing — and nothing wakes an agent on an unread inbox alone,
+    // so no one retries it either. The failure line is the only thing telling
+    // the user to re-ask.
+    //
+    // `message.posted` specifically, not "any visible side effect": leave,
+    // invite, kick, topic_updated and renamed all report visibleToUser too, and
+    // an agent that renamed the room in hop 2 has not answered anybody.
+    // Per conversation, because one turn can span several and only some of them
+    // may have been answered.
+    const deliveredConvoIds = new Set(
+      cliSideEffectsThisTurn
+        .filter((e) => e.event === 'message.posted' && e.visibleToUser !== false)
+        .map((e) => e.conversationId)
+        .filter((id): id is string => typeof id === 'string'),
+    )
     const reason = agentTurnFailureNoticeReason(summary, err)
-    const noticeText = `Agent run failed before it could finish (${reason}). No result was produced.`
+    const failedText = `Agent run failed before it could finish (${reason}).`
+    const noticeTextFor = (convoId: string): string => (
+      deliveredConvoIds.has(convoId) ? failedText : `${failedText} No result was produced.`
+    )
     const withNoticeTimeout = async <T>(promise: Promise<T>, label: string): Promise<T> => {
       const timeoutMs = 5_000
       let timer: ReturnType<typeof setTimeout> | null = null
@@ -1798,7 +1826,7 @@ export async function runAgentTurn(agentId: string, options: AgentTurnOptions = 
           companyId: convoCompanyId,
           agentId,
           noticeKind: 'agent_turn_failed',
-          text: noticeText,
+          text: noticeTextFor(convoId),
           dedupeKey: `agent_turn_failed:${convoId}:${inputKey}`,
           dedupeTtlSec: 6 * 3600,
         }), `postSystemNotice(${convoId})`)
@@ -1812,6 +1840,7 @@ export async function runAgentTurn(agentId: string, options: AgentTurnOptions = 
             reason,
             inputMessageIds: convoInbox.map((m) => m.id),
             noticePosted: res.posted,
+            resultDelivered: deliveredConvoIds.has(convoId),
           },
           stage: 'failed',
         }).catch(() => { /* observability best-effort */ })
@@ -2928,6 +2957,7 @@ Mechanics:
       }).catch(() => { /* observability best-effort */ })
       try {
         const result = await executePodTool({
+          runId,
           agentId, name: tc.name, argsJson: tc.arguments, ns: namespace,
           signal: batchAbortController.signal,
         })
@@ -3231,12 +3261,54 @@ Mechanics:
         },
         stage: 'auto_relay',
       })
+      // `--continue` bypasses cmdReply's anti-monologue gate, and the relay is
+      // the one caller that must have it.
+      //
+      // The operating rules above REQUIRE an intent message before any work
+      // that keeps the asker waiting ("Drafting the email now"), posted as a
+      // SEPARATE `cumora reply`. In a group of three or more that intent
+      // message is then the room's last message and less than ten minutes old,
+      // which is exactly what the gate refuses — so the relay of the actual
+      // answer failed, `finalStatus` went to 'failed', and the room got
+      // "Agent run failed before it could finish. No result was produced."
+      // in place of the work the agent had just done.
+      //
+      // The gate exists to stop the agent DECIDING to speak again: "each
+      // wake-up is a fresh 'should I respond?' decision with no global
+      // stop-signal" (see cmdReply). The relay is not a decision. It is the
+      // runtime delivering text the model already composed and explicitly
+      // declared as this turn's reply, at most once per turn — the deliberate
+      // commitment `--continue` was documented for.
+      //
+      // The flag goes LAST on purpose. parseArgs reads `--continue <token>` as
+      // a value flag, so placing it before the body would consume the body and
+      // post an empty message.
       const relay = await executePodTool({
+        runId,
         agentId, name: 'bash',
-        argsJson: JSON.stringify({ command: `cumora reply ${target.conversationId} ${escaped}` }),
+        argsJson: JSON.stringify({ command: `cumora reply ${target.conversationId} ${escaped} --continue` }),
         ns: namespace,
       })
-      if (!relay.ok) {
+      // Exit 2 is HELD: cmdReply deliberately declined the write because a peer
+      // already delivered this. Nothing failed — the coordination system did
+      // its job and the room already has the answer. Reporting that as a failed
+      // run puts "Agent run failed … No result was produced" under a result
+      // that a teammate produced seconds earlier. `skipped` is the status this
+      // file already uses for a turn that intentionally does nothing.
+      const relayExit = (relay.output as { exitCode?: unknown } | null)?.exitCode
+      const relayHeld = !relay.ok && relayExit === 2
+      if (relayHeld) {
+        finalStatus = 'skipped'
+        finalSummary ||= 'Auto-relay held — a peer already delivered this'
+        await runtime.recordEvent({
+          runId, agentId, companyId: convoCompanyId,
+          kind: 'turn.auto_relay_held',
+          level: 'info',
+          title: 'Auto-relay held by a peer delivery',
+          data: { conversationId: target.conversationId, output: relay.output },
+          stage: 'auto_relay_held',
+        })
+      } else if (!relay.ok) {
         finalStatus = 'failed'
         finalError = `Auto-relay reply failed: ${relay.error ?? 'unknown error'}`
         await runtime.recordEvent({
@@ -3488,7 +3560,25 @@ Mechanics:
     // agent would re-process them. Per-conversation: take the
     // latest message id we drained (markConversationRead picks the
     // max created_at via GREATEST(...) so out-of-order is fine).
-    if (steeredMessageIds.size > 0) {
+    //
+    // ONLY on a completed turn. This is a `finally`, so it used to run on
+    // 'failed' and 'skipped' too — and there the advance is not an
+    // optimization, it is a deletion. A steer arrived DURING the turn, so its
+    // (created_at, id) is later than every message the turn was answering, and
+    // loadInbox compares one cursor per conversation:
+    //
+    //   AND ROW(mm.created_at, mm.id) > ROW(co.lr_at, co.lr_id)
+    //
+    // so advancing to the steer buries the turn's own unanswered inbox with
+    // it. Ask a question, add a follow-up while the agent works, let the turn
+    // die at MAX_HOPS or on a 429: the room gets a failure notice and BOTH
+    // messages are gone from every future inbox. Nothing retries them.
+    //
+    // That also contradicted the fingerprint contract twenty lines up:
+    // "Failed turns do not update the fingerprint, so they remain retryable
+    // instead of disappearing into a silent skip." Retryable work needs its
+    // inbox rows to still be there.
+    if (steeredMessageIds.size > 0 && finalStatus === 'completed') {
       // Group by conversation so we only do one upsert per convo.
       const byConvo = new Map<string, string>()
       for (const [messageId, conversationId] of steeredMessageIds) {

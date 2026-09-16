@@ -325,13 +325,17 @@ test('pi forced stop kills an EOF-resistant child before the daemon can exit', {
 
   // Wait until the child has started and accepted get_state, then model the
   // daemon's final shutdown path: there is no two-second timer opportunity.
-  for (let i = 0; i < 50 && (await fakeLog(f)).length < 2; i += 1) await delay(20)
+  // The budget is generous because it only bounds a *spawn*, and the loop
+  // leaves the moment the child is up: one second was enough on CI but not on
+  // a developer machine running the whole suite in parallel, where this read
+  // an un-started child as a missing pid.
+  for (let i = 0; i < 250 && (await fakeLog(f)).length < 2; i += 1) await delay(20)
   const pid = (await fakeLog(f))[0]?.pid
   assert.equal(typeof pid, 'number')
   await session.stop({ force: true })
 
   let alive = true
-  for (let i = 0; i < 50 && alive; i += 1) {
+  for (let i = 0; i < 250 && alive; i += 1) {
     try { process.kill(pid as number, 0) }
     catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'ESRCH') alive = false

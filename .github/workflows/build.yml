@@ -7,8 +7,8 @@
 #   the agent runtime is unaffected by typical UI / docs / k8s changes.
 #
 # This workflow ONLY builds. Deploy is a separate manual workflow
-# (deploy.yml) so a bad commit on main doesn't auto-ship to prod —
-# trade-off chosen explicitly: "手动触发" / tag push.
+# (deploy.yml, workflow_dispatch only) so a bad commit on main doesn't
+# auto-ship to prod — trade-off chosen explicitly: "手动触发".
 
 name: Build
 
@@ -51,6 +51,10 @@ jobs:
               - 'server/docker/agent-computer.Dockerfile.dockerignore'
               - 'server/docker/agent-computer-cumora.sh'
               - 'server/docker/agent-computer-entrypoint.sh'
+              - 'server/docker/agent-computer-bootstrap.sh'
+              - 'server/scripts/agent-boundary-smoke.mjs'
+              - 'server/scripts/fixtures/agent-boundary-loop.cjs'
+              - 'server/scripts/fixtures/agent-boundary-backend.py'
               - 'agent-fuse/**'
               - '.github/workflows/build.yml'
               - 'package.json'
@@ -81,6 +85,10 @@ jobs:
         run: npx tsc --noEmit
       - name: tsc (server)
         run: npm run server:typecheck
+      - name: Install R2 Worker dependencies
+        run: npm ci --prefix workers/r2-gate
+      - name: tsc (R2 gate)
+        run: npm run typecheck --prefix workers/r2-gate
 
   quality:
     name: Guards + unit + integration
@@ -252,6 +260,23 @@ jobs:
           cache-from: type=gha,scope=agent
           # Same ignore-error rationale as the server image above.
           cache-to: type=gha,scope=agent,mode=max,ignore-error=true
+
+      - name: Pull agent image for boundary smoke
+        run: |
+          docker pull "${{ env.AR_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT }}/${{ env.AR_REPO }}/agent-computer:${{ steps.meta.outputs.tag }}"
+
+      - name: Run real agent boundary smoke
+        env:
+          CUMORA_AGENT_BOUNDARY_IMAGE: ${{ env.AR_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT }}/${{ env.AR_REPO }}/agent-computer:${{ steps.meta.outputs.tag }}
+        run: node server/scripts/agent-boundary-smoke.mjs
+
+      - name: Upload boundary smoke report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-boundary-smoke-${{ steps.meta.outputs.tag }}
+          path: /tmp/cumora-agent-boundary-smoke-*/report.json
+          if-no-files-found: ignore
 
       - name: Summary
         run: |

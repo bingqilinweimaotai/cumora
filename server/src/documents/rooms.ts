@@ -17,6 +17,7 @@
 import * as Y from 'yjs'
 import type { PoolClient } from 'pg'
 import { pool } from '../db/pool.js'
+import { compactDocument, readDocumentState } from './persistence.js'
 import {
   redis, sub, publish,
   CH_DOC_UPDATE, CH_DOC_AWARENESS,
@@ -49,6 +50,7 @@ interface Room {
   subs: Set<DocSubscriber>
   /** Updates since last snapshot — drives the compaction threshold. */
   updatesSinceSnapshot: number
+  compacting: boolean
   /** Set during cold-load to coalesce concurrent waiters. */
   loaded: Promise<void>
   /** Marked true after the doc is hydrated from DB; flips OFF doc.on('update')
@@ -68,34 +70,27 @@ const evictions = new Map<string, NodeJS.Timeout>()
  *  echo-suppressed when they originated here. */
 const INSTANCE_ORIGIN = `instance:${env.INSTANCE_ID}`
 
-async function loadSnapshot(
+/** Persist one update through an explicit client, so it lands inside the
+ *  caller's transaction. `doc create --body` seeds the body while its own
+ *  `INSERT INTO documents` is still uncommitted; going out on the global pool
+ *  means a different connection, where the FK to documents(id) cannot see the
+ *  parent row and fails instantly (it does not wait — there is no row to lock).
+ *  That failure was swallowed by a console.warn while the CLI reported success,
+ *  so the body never reached the database and every later edit became a Yjs
+ *  struct whose parent is missing: appended work persisted as a row and still
+ *  rendered as nothing on the next cold load. Measured on the project's own
+ *  PG 16: 11 of 20 `doc create --body` runs lost the body this way. */
+export async function persistUpdateWith(
+  client: PoolClient,
   documentId: string,
-  dbClient?: PoolClient,
-): Promise<{ state: Uint8Array | null; lastIncluded: bigint }> {
-  const { rows } = await (dbClient ?? pool).query<{ state_bytes: Buffer; snapshot_at_update_id: string }>(
-    `SELECT state_bytes, snapshot_at_update_id
-       FROM document_snapshots
-      WHERE document_id = $1`,
-    [documentId],
+  authorId: string,
+  bytes: Uint8Array,
+): Promise<void> {
+  await client.query(
+    `INSERT INTO document_updates (document_id, author_id, update_bytes)
+     VALUES ($1, $2, $3)`,
+    [documentId, authorId, Buffer.from(bytes)],
   )
-  const row = rows[0]
-  if (!row) return { state: null, lastIncluded: 0n }
-  return { state: new Uint8Array(row.state_bytes), lastIncluded: BigInt(row.snapshot_at_update_id) }
-}
-
-async function loadUpdatesAfter(
-  documentId: string,
-  afterId: bigint,
-  dbClient?: PoolClient,
-): Promise<Array<{ id: bigint; bytes: Uint8Array }>> {
-  const { rows } = await (dbClient ?? pool).query<{ id: string; update_bytes: Buffer }>(
-    `SELECT id, update_bytes
-       FROM document_updates
-      WHERE document_id = $1 AND id > $2
-      ORDER BY id ASC`,
-    [documentId, afterId.toString()],
-  )
-  return rows.map((r) => ({ id: BigInt(r.id), bytes: new Uint8Array(r.update_bytes) }))
 }
 
 async function persistUpdate(documentId: string, authorId: string, bytes: Uint8Array): Promise<void> {
@@ -113,49 +108,22 @@ async function persistUpdate(documentId: string, authorId: string, bytes: Uint8A
 }
 
 async function maybeCompact(room: Room): Promise<void> {
-  if (room.updatesSinceSnapshot < COMPACT_AFTER_UPDATES) return
-  // Snapshot the current state and find the latest update id covered.
-  const state = Y.encodeStateAsUpdate(room.doc)
-  const { rows } = await pool.query<{ max_id: string | null }>(
-    `SELECT MAX(id)::text AS max_id FROM document_updates WHERE document_id = $1`,
-    [room.documentId],
-  )
-  const maxId = rows[0]?.max_id ? BigInt(rows[0].max_id) : 0n
-  await pool.query(
-    `INSERT INTO document_snapshots (document_id, state_bytes, snapshot_at_update_id, updated_at)
-     VALUES ($1, $2, $3, NOW())
-     ON CONFLICT (document_id)
-       DO UPDATE SET state_bytes = EXCLUDED.state_bytes,
-                     snapshot_at_update_id = EXCLUDED.snapshot_at_update_id,
-                     updated_at = NOW()`,
-    [room.documentId, Buffer.from(state), maxId.toString()],
-  )
-  // Trim updates that are now safely captured in the snapshot.
-  await pool.query(
-    `DELETE FROM document_updates WHERE document_id = $1 AND id <= $2`,
-    [room.documentId, maxId.toString()],
-  )
-  room.updatesSinceSnapshot = 0
+  if (room.compacting || room.updatesSinceSnapshot < COMPACT_AFTER_UPDATES) return
+  room.compacting = true
+  const updatesAtStart = room.updatesSinceSnapshot
+  try {
+    if (await compactDocument(pool, room.documentId)) {
+      // Keep edits persisted while compaction was running in the next count.
+      room.updatesSinceSnapshot -= updatesAtStart
+    }
+  } finally {
+    room.compacting = false
+  }
 }
 
 async function hydrateDoc(documentId: string, doc: Y.Doc, dbClient?: PoolClient): Promise<void> {
-  // A cold load is a two-query logical read. When the caller does not already
-  // own a transaction connection, reserve one for the whole hydration rather
-  // than returning it between snapshot and tail. Otherwise a pool-full wave
-  // of locked CLI callers can occupy every released slot while waiting on the
-  // shared `room.loaded`, leaving each hydration's tail query queued behind
-  // the callers that depend on it.
-  const client = dbClient ?? await pool.connect()
-  try {
-    const snap = await loadSnapshot(documentId, client)
-    if (snap.state) Y.applyUpdate(doc, snap.state, 'hydrate')
-    const tail = await loadUpdatesAfter(documentId, snap.lastIncluded, client)
-    for (const u of tail) {
-      Y.applyUpdate(doc, u.bytes, 'hydrate')
-    }
-  } finally {
-    if (!dbClient) client.release()
-  }
+  const rows = await readDocumentState(dbClient ?? pool, documentId)
+  for (const row of rows) Y.applyUpdate(doc, new Uint8Array(row.bytes), 'hydrate')
 }
 
 function roomKey(documentId: string): string {
@@ -184,6 +152,7 @@ async function getOrCreateRoom(
     doc,
     subs: new Set(),
     updatesSinceSnapshot: 0,
+    compacting: false,
     hydrated: false,
     loaded: Promise.resolve(),
   }
@@ -215,13 +184,26 @@ async function getOrCreateRoom(
         try { s.onUpdate(update, originId) } catch (e) { console.warn('[docs] sub error', e) }
       }
 
+      // A caller editing inside its own transaction takes the update instead:
+      // it writes it on its own client so the row is atomic with whatever else
+      // that transaction is doing (see persistUpdateWith). Fan-out is unchanged.
+      const collectInto = (typeof origin === 'object' && origin !== null && 'collectInto' in origin)
+        ? (origin as { collectInto: Uint8Array[] }).collectInto
+        : null
+
       // Persist + fan-out unless this update arrived FROM another instance
       // (it's already persisted there + already on the bus).
-      if (!isRemote) {
-        room.updatesSinceSnapshot += 1
-        void persistUpdate(documentId, authorId, update).catch((e) => {
+      if (!isRemote && collectInto) {
+        collectInto.push(update)
+      } else if (!isRemote) {
+        void persistUpdate(documentId, authorId, update).then(() => {
+          room.updatesSinceSnapshot += 1
+          void maybeCompact(room).catch((e) => console.warn('[docs] compact failed', e))
+        }).catch((e) => {
           console.warn('[docs] persistUpdate failed', e)
         })
+      }
+      if (!isRemote) {
         void publish(CH_DOC_UPDATE, {
           type: 'doc.update',
           companyId: room.companyId,
@@ -230,7 +212,6 @@ async function getOrCreateRoom(
           originId,
           authorId,
         }).catch(() => { /* swallow */ })
-        void maybeCompact(room).catch((e) => console.warn('[docs] compact failed', e))
       }
     })
     normalizeMarkdownImageParagraphs(doc, pmFragment(doc), { originId: 'system:doc-image-normalize', authorId: 'system' })
@@ -517,6 +498,103 @@ function xmlAttrString(el: Y.XmlElement, key: string): string {
   return typeof value === 'string' ? value : ''
 }
 
+/** Pure in-memory extraction of all storage keys referenced in a document.
+ *  Checks native image nodes, markdown image paragraphs, link marks, and
+ *  embedded attachment references without triggering any URL refresh or DB write. */
+export function extractStorageKeysFromDoc(doc: Y.Doc): string[] {
+  const keys = new Set<string>()
+  const fragment = pmFragment(doc)
+
+  function inspectString(val: string) {
+    if (!val) return
+    const direct = normalizeStorageKey(val) ?? storageKeyFromPublicUrl(val)
+    if (direct) {
+      keys.add(direct)
+      return
+    }
+    const matches = val.matchAll(/(?:attachments|email-attachments|avatars)\/[A-Za-z0-9_.-]+/g)
+    for (const m of matches) {
+      const k = normalizeStorageKey(m[0])
+      if (k) keys.add(k)
+    }
+  }
+
+  function walk(parent: Y.XmlFragment | Y.XmlElement) {
+    for (let i = 0; i < parent.length; i++) {
+      const child = parent.get(i) as Y.AbstractType<unknown>
+      if (child instanceof Y.XmlElement) {
+        if (child.nodeName === 'image') {
+          const key = imageStorageKey(child)
+          if (key) {
+            keys.add(key)
+          } else {
+            inspectString(xmlAttrString(child, 'src'))
+          }
+        } else if (child.nodeName === 'paragraph') {
+          const replacement = paragraphImageNode(child)
+          if (replacement && 'attrs' in replacement && replacement.attrs?.src) {
+            inspectString(String(replacement.attrs.src))
+          }
+        }
+        walk(child)
+      } else if (child instanceof Y.XmlText) {
+        const delta = child.toDelta() as Array<{ insert?: unknown; attributes?: unknown }>
+        for (const op of delta) {
+          const href = hrefFromDeltaAttributes(op.attributes)
+          if (href) inspectString(href)
+          if (typeof op.insert === 'string' && (op.insert.includes('attachments/') || op.insert.includes('avatars/'))) {
+            inspectString(op.insert)
+          }
+        }
+      }
+    }
+  }
+
+  walk(fragment)
+  return Array.from(keys)
+}
+
+/** Collect storage keys for a document. Reuses an active in-memory room if present,
+ *  otherwise hydrates a temporary in-memory Y.Doc without adding to the room map,
+ *  registering listeners, or refreshing presigned URLs. */
+export async function collectDocumentStorageKeys(
+  documentId: string,
+  dbClient?: PoolClient,
+): Promise<string[]> {
+  const existing = rooms.get(roomKey(documentId))
+  if (existing) {
+    try {
+      await existing.loaded
+      return extractStorageKeysFromDoc(existing.doc)
+    } catch {
+      // Fall through to cold hydration if existing room threw
+    }
+  }
+
+  const doc = new Y.Doc()
+  try {
+    await hydrateDoc(documentId, doc, dbClient)
+    return extractStorageKeysFromDoc(doc)
+  } finally {
+    doc.destroy()
+  }
+}
+
+/** Evict an in-memory document room immediately, e.g. upon document deletion. */
+export function evictDocumentRoom(documentId: string): void {
+  const pending = evictions.get(documentId)
+  if (pending) {
+    clearTimeout(pending)
+    evictions.delete(documentId)
+  }
+  const room = rooms.get(roomKey(documentId))
+  if (room) {
+    rooms.delete(roomKey(documentId))
+    room.subs.clear()
+    room.doc.destroy()
+  }
+}
+
 function escapeMarkdownImageText(text: string): string {
   return text.replace(/\\/g, '\\\\').replace(/]/g, '\\]')
 }
@@ -735,14 +813,28 @@ export async function applyAgentEdit(
     | { kind: 'imageDelete'; match: AgentImageDeleteMatch }
   >,
   dbClient?: PoolClient,
-): Promise<{ replaced: number; imagePlaced: 'absolute' | 'anchor' | 'anchor-missed' | null; imagesDeleted: number; blocksReplaced: number }> {
+): Promise<{
+  replaced: number
+  imagePlaced: 'absolute' | 'anchor' | 'anchor-missed' | null
+  imagesDeleted: number
+  blocksReplaced: number
+  deletedStorageKeys: string[]
+}> {
   const room = await getOrCreateRoom(documentId, companyId, dbClient)
   const fragment = pmFragment(room.doc)
   let replaced = 0
   let imagePlaced: 'absolute' | 'anchor' | 'anchor-missed' | null = null
   let imagesDeleted = 0
   let blocksReplaced = 0
-  const origin = { originId: `agent:${agentId}`, authorId: agentId } as never
+  const deletedStorageKeys: string[] = []
+  // When the caller is inside a transaction, take the update out of the room's
+  // fire-and-forget persist path and write it on the caller's own client below.
+  // `doc create --body` needs this: its `INSERT INTO documents` is still
+  // uncommitted, so the global pool cannot see the parent row.
+  const collected: Uint8Array[] = []
+  const origin = (dbClient
+    ? { originId: `agent:${agentId}`, authorId: agentId, collectInto: collected }
+    : { originId: `agent:${agentId}`, authorId: agentId }) as never
   room.doc.transact(() => {
     for (const op of ops) {
       if (op.kind === 'append') {
@@ -825,6 +917,8 @@ export async function applyAgentEdit(
         // images but possible).
         matches.sort((a, b) => b.index - a.index)
         for (const m of matches) {
+          const key = imageStorageKey(m.element)
+          if (key) deletedStorageKeys.push(key)
           m.container.delete(m.index, 1)
           imagesDeleted++
         }
@@ -843,7 +937,18 @@ export async function applyAgentEdit(
     }
     normalizeMarkdownImageParagraphChildren(fragment)
   }, origin)
-  return { replaced, imagePlaced, imagesDeleted, blocksReplaced }
+  // Awaited, on the caller's client, and NOT swallowed: if this write fails the
+  // command fails, instead of reporting success over a body that never landed.
+  for (const update of collected) {
+    if (!dbClient) break
+    await persistUpdateWith(dbClient, documentId, agentId, update)
+    room.updatesSinceSnapshot += 1
+  }
+  if (collected.length > 0) {
+    void maybeCompact(room).catch((e) => console.warn('[docs] compact failed', e))
+  }
+
+  return { replaced, imagePlaced, imagesDeleted, blocksReplaced, deletedStorageKeys }
 }
 
 /** Cross-instance bus bootstrap. Idempotent — safe to call from index.ts

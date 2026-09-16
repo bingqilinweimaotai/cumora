@@ -69,6 +69,17 @@ export const env = {
    *  self-hosted proxy or a pinned API version. */
   NOVITA_BASE_URL: (process.env.NOVITA_BASE_URL ?? 'https://api.novita.ai/openai').replace(/\/+$/, ''),
   /**
+   * OrcaRouter LLM API key. Optional — when unset, agents configured with a
+   * `orcarouter/<model>` model id (see server/src/orcarouter.ts) fall back to
+   * the legacy/sub2api client instead, so an unconfigured deployment doesn't
+   * break the run; the model just won't resolve to OrcaRouter as intended.
+   */
+  ORCAROUTER_API_KEY: process.env.ORCAROUTER_API_KEY ?? '',
+  /** OrcaRouter's OpenAI-compatible Responses base. OrcaRouter speaks the
+   *  Responses API natively, so the `orcarouter/<model>` route is a pure
+   *  base-URL swap (no Chat-Completions translation, unlike Novita). */
+  ORCAROUTER_BASE_URL: (process.env.ORCAROUTER_BASE_URL ?? 'https://api.orcarouter.ai/v1').replace(/\/+$/, ''),
+  /**
    * Webhook URL for process-level alerts (unhandledRejection /
    * uncaughtException). Currently expects a Discord-compatible
    * `{ content: "..." }` JSON payload. When unset, alerts are still
@@ -85,6 +96,14 @@ export const env = {
    * and you need to disable it without a redeploy.
    */
   STEER_ENABLED: !/^(false|0|no|off)$/i.test(process.env.STEER_ENABLED ?? ''),
+  /**
+   * The `one-of-us` half of agent routing (#70): when a human group message
+   * names NO agent, the small-model router may elect ONE candidate to take the
+   * turn instead of waking the whole room. Election + lease + fallback live in
+   * agents/routing-election.ts / agents/routing-claims.ts.
+   * Default 'off' (opt-in) — set ROUTING_ONE_OF_US=true to enable.
+   */
+  ROUTING_ONE_OF_US: /^(true|1|yes|on)$/i.test(process.env.ROUTING_ONE_OF_US ?? ''),
   /**
    * Minimum interval (ms) between alerts that share the same
    * (label, error-fingerprint). Defaults to 60s — protects the webhook
@@ -401,6 +420,14 @@ export const env = {
   DB_GC_LLM_CALLS_DAYS: Number(process.env.DB_GC_LLM_CALLS_DAYS ?? 90),
   /** Days past expires_at before a ws_ticket row is reaped. */
   DB_GC_WS_TICKETS_DAYS: Number(process.env.DB_GC_WS_TICKETS_DAYS ?? 1),
+  /** Durable external-resource cleanup after workspace deletion. Set the
+   * interval to 0 to leave jobs queued for a separately invoked worker. */
+  WORKSPACE_CLEANUP_INTERVAL_MS: Number(process.env.WORKSPACE_CLEANUP_INTERVAL_MS ?? 60_000),
+  /** Explicitly enable Kubernetes Pod/PVC cleanup. Local and integration
+   * environments default off without relying on database-name heuristics. */
+  WORKSPACE_RUNTIME_CLEANUP_ENABLED: ['1', 'true', 'yes', 'on'].includes(
+    (process.env.WORKSPACE_RUNTIME_CLEANUP_ENABLED ?? '').toLowerCase(),
+  ),
   /** Interval between poll-expiration sweeps. Defaults to 60s. The sweep
    *  flips polls past their expiresAt to closed and broadcasts the close
    *  event. Set to 0 to disable (polls then stay open forever even after

@@ -7,7 +7,51 @@ export type Status = 'avail' | 'working' | 'thinking' | 'waiting' | 'resting'
 export type ComputerKind = 'cloud' | 'local' | 'vps'
 export type ComputerStatus = 'online' | 'offline' | 'busy'
 /** Engine an agent's host runs it on. 'managed' = Cumora's server-side loop. */
-export type EngineId = 'managed' | 'claude' | 'codex' | 'grok' | 'cursor' | 'opencode' | 'pi' | 'gemini'
+export type EngineId = 'managed' | 'claude' | 'codex' | 'grok' | 'cursor' | 'opencode' | 'pi' | 'gemini' | 'qwen' | 'antigravity' | 'zcode'
+
+export interface EngineModelOption {
+  id: string
+  label: string
+  description?: string | null
+  recommendedFor?: Array<'big' | 'small'>
+}
+
+export interface EngineModelCatalog {
+  models: EngineModelOption[]
+  defaultModel: string | null
+  defaultFastModel: string | null
+  prefersLocalDefault?: boolean
+  supportsCustom: boolean
+  fastModelScope: 'agent' | 'computer' | 'unsupported'
+  source: 'protocol' | 'cli' | 'presets'
+}
+
+export interface DetectedEngine {
+  providerProfiles?: Array<{ id: string; label: string; model: string; fastModel: string }>
+  id: EngineId
+  bin: string
+  path: string | null
+  /** Installed version on that computer, and the newest one upstream. Null
+   * when the probe found nothing or the daemon predates version reporting. */
+  version?: string | null
+  latest?: string | null
+  outdated?: boolean
+  /** How to update this engine on that computer (vendor updater, brew, or npm). */
+  updateCommand?: string | null
+  /** Set when Cumora refuses to drive an installed engine. */
+  blockedReason?: string | null
+  /** Models visible to the CLI login/config on this specific computer. */
+  modelCatalog?: EngineModelCatalog
+}
+
+/** Per-engine default model settings. Stored on the Computer and inherited
+ *  by agents when their own model/fastModel is not set. */
+export interface EngineDefaults {
+  model?: string | null
+  fastModel?: string | null
+}
+
+export type EngineDefaultsMap = Partial<Record<EngineId, EngineDefaults>>
 
 export interface Computer {
   id: string
@@ -19,18 +63,7 @@ export interface Computer {
   /** Engines installed on THIS computer, as reported by the daemon running on
    *  it. Never a scan of whichever machine is displaying the card — see
    *  server/src/agents/computer/cli-version.ts. */
-  detectedEngines?: Array<{
-    id: EngineId
-    bin: string
-    path: string | null
-    /** Installed version on that computer, and the newest one upstream. Null
-     *  when the probe found nothing or the daemon predates version reporting. */
-    version?: string | null
-    latest?: string | null
-    outdated?: boolean
-    /** How to update this engine on that computer (vendor updater, brew, or npm). */
-    updateCommand?: string | null
-  }>
+  detectedEngines?: DetectedEngine[]
   enginesDetectedAt?: string | null
   lastSeenAt?: string | null
   pairedAt?: string | null
@@ -43,6 +76,9 @@ export interface Computer {
   latestDaemonVersion?: string | null
   /** True when the daemon is behind the latest version → show the upgrade banner. */
   daemonOutdated?: boolean
+  /** Per-engine default model settings. Agents inherit these when their own
+   *  model/fastModel is not set. */
+  engineDefaults?: EngineDefaultsMap
 }
 
 export interface Participant {
@@ -64,6 +100,7 @@ export interface Participant {
   /** big-brain (main) model override; null/undefined = use system default */
   model?: string | null
   /** small-brain (fast/auxiliary) model override */
+  providerProfile?: string | null
   fastModel?: string | null
   /** id of the Computer this agent runs on (null/undefined = Cumora Cloud) */
   computerId?: string | null

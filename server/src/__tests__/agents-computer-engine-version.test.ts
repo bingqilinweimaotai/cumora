@@ -10,7 +10,7 @@
  */
 
 import assert from 'node:assert/strict'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -21,6 +21,7 @@ process.env.OPENAI_API_KEY ??= 'test-key'
 const {
   parseCliVersion, isCliOutdated, isCliVersionAtLeast, inferUpdateCommand,
   parseCursorAbout, parseGrokCheck, ENGINE_VERSION_SPECS, versionCommandInvocation,
+  probeLocalEngineVersionWithRetry,
 } = await import('../agents/computer/cli-version.js')
 const { sanitizeDetectedEngines } = await import('../agents/computer/registry.js')
 
@@ -48,6 +49,28 @@ test('Windows version probe replaces an extensionless npm shim with its runnable
       args: ['/d', '/s', '/c', `""${shim}.cmd" --version"`],
       windowsVerbatimArguments: true,
     })
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('an inconclusive local version probe retries and stops on the first concrete version', { skip: process.platform === 'win32' }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'cumora-engine-version-retry-'))
+  try {
+    const counter = join(root, 'counter')
+    const cli = join(root, 'claude')
+    await writeFile(cli, [
+      '#!/usr/bin/env node',
+      "const fs = require('node:fs')",
+      `const counter = ${JSON.stringify(counter)}`,
+      "const n = Number(fs.existsSync(counter) ? fs.readFileSync(counter, 'utf8') : '0') + 1",
+      "fs.writeFileSync(counter, String(n))",
+      "if (n >= 3) process.stdout.write('claude 2.1.248\\n')",
+    ].join('\n'))
+    await chmod(cli, 0o755)
+
+    assert.equal(await probeLocalEngineVersionWithRetry('claude', cli, [0, 1, 1]), '2.1.248')
+    assert.equal(await readFile(counter, 'utf8'), '3')
   } finally {
     await rm(root, { recursive: true, force: true })
   }
@@ -96,6 +119,10 @@ test('inferUpdateCommand prefers the vendor updater, then brew, then npm', () =>
   // pi needs the vendor's documented flag when it falls through to npm.
   assert.equal(inferUpdateCommand({ versionArgs: ['--version'], npm: '@earendil-works/pi-coding-agent', npmFlags: '--ignore-scripts' }, '/usr/local/bin/pi'),
     'npm install -g --ignore-scripts @earendil-works/pi-coding-agent@latest')
+  assert.equal(
+    inferUpdateCommand(ENGINE_VERSION_SPECS.antigravity, '/Users/test/.local/bin/agy'),
+    'agy update',
+  )
 })
 
 test('parseCursorAbout / parseGrokCheck read their vendor formats', () => {
@@ -118,6 +145,7 @@ test('sanitizeDetectedEngines carries version fields through', () => {
     id: 'codex', bin: 'codex', path: '/usr/local/bin/codex',
     version: '0.5.0', latest: '0.6.0', outdated: true,
     updateCommand: 'npm install -g @openai/codex@latest',
+    blockedReason: null,
   }])
 })
 
@@ -168,4 +196,26 @@ test('sanitizeDetectedEngines tolerates a daemon too old to report versions', ()
   assert.equal(row?.latest, null)
   assert.equal(row?.outdated, false)
   assert.equal(row?.updateCommand, null)
+})
+
+test('sanitizeDetectedEngines bounds and cleans account-specific model catalogs', () => {
+  const [row] = sanitizeDetectedEngines([{
+    id: 'codex', bin: 'codex', path: '/usr/local/bin/codex',
+    modelCatalog: {
+      source: 'protocol', supportsCustom: true, fastModelScope: 'agent',
+      defaultModel: 'gpt-5.6-sol', defaultFastModel: 'gpt-5.4-mini',
+      models: [
+        { id: 'gpt-5.6-sol', label: 'GPT-5.6-Sol\nspoof', recommendedFor: ['big', 'bogus'] },
+        { id: 'gpt-5.6-sol', label: 'duplicate' },
+        { id: '', label: 'empty' },
+      ],
+    },
+  }], ['codex'])
+  assert.deepEqual(row?.modelCatalog, {
+    source: 'protocol', supportsCustom: true, fastModelScope: 'agent',
+    defaultModel: 'gpt-5.6-sol', defaultFastModel: 'gpt-5.4-mini',
+    models: [{
+      id: 'gpt-5.6-sol', label: 'GPT-5.6-Sol spoof', description: null, recommendedFor: ['big'],
+    }],
+  })
 })

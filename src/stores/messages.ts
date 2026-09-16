@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import type { Message, ReactionEntry } from '@/types'
+import { applyReplyCountDelta } from '@/lib/replyCount'
 import { api, ApiError, ws, type WsEvent, type ApiMessage } from '@/api/client'
 import { useApp } from '@/stores/app'
 import { getMeId } from '@/stores/auth'
@@ -327,6 +328,55 @@ function mergeFetchedMessages(current: Message[] | undefined, incoming: Message[
   return sortMessagesStable(merged)
 }
 
+/** The newest sequence below which the cache is known COMPLETE — not simply
+ *  the biggest number it holds.
+ *
+ *  Those differ after an outage. On reconnect the store invalidates `loaded`
+ *  for every conversation except the open one, so a cached-but-unopened
+ *  conversation backfills when the user next opens it. `applyEvent` appends
+ *  live `message.new` rows to byConvo for ANY cached conversation though, and
+ *  those land first. Taking the max then reads that lone new row as proof the
+ *  history is caught up, the bridging loop below never runs, and the outage
+ *  stays as a hole that nothing else fills for the rest of the session.
+ *
+ *  So walk the cache oldest-first and stop at the first discontinuity: that
+ *  run is what we can actually vouch for, and a message that arrived after the
+ *  gap is the island it should be. A rolled-back sequence leaves a real hole
+ *  and truncates the answer early — which only costs an extra page, and the
+ *  merge drops what we already hold. Erring toward re-fetching is the safe
+ *  direction; erring toward "caught up" loses messages. */
+function completeThrough(current: Message[]): number | null {
+  const sequences = current
+    .map(sequenceOf)
+    // Optimistic messages use MAX_SAFE_INTEGER until their WS echo arrives.
+    .filter((seq): seq is number => seq !== null && seq !== Number.MAX_SAFE_INTEGER)
+    .sort((a, b) => a - b)
+  if (sequences.length === 0) return null
+  let through = sequences[0]
+  for (const seq of sequences) {
+    if (seq === through || seq === through + 1) through = seq
+    else break
+  }
+  return through
+}
+
+async function fetchMessagesSinceCache(id: string, current: Message[] = []): Promise<ApiMessage[]> {
+  const latest = completeThrough(current)
+  const held = new Set(current.map((message) => message.id))
+
+  let page = await api.getMessages(id, { limit: MESSAGES_PAGE_SIZE })
+  const messages = [...page]
+  // Bridge the disconnect before merging, otherwise loadOlder's cursor skips the gap.
+  while (latest !== null && page.length === MESSAGES_PAGE_SIZE && page[0].sequence > latest) {
+    page = await api.getMessages(id, { before: page[0].sequence, limit: MESSAGES_PAGE_SIZE })
+    // Only fill the gap; leave older history and its scroll anchor to loadOlder.
+    // By id, not by sequence: a hole in the run above means some of what comes
+    // back is already here, and re-adding it would duplicate rows.
+    messages.unshift(...page.filter((message) => !held.has(message.id) && message.sequence > latest))
+  }
+  return messages
+}
+
 export const useMessages = create<MessagesState>((set, get) => ({
   byConvo: {},
   streaming: {},
@@ -346,7 +396,7 @@ export const useMessages = create<MessagesState>((set, get) => ({
       return { loading: new Set(s.loading).add(id), errors: restErrors }
     })
     try {
-      const msgs = await api.getMessages(id, { limit: MESSAGES_PAGE_SIZE })
+      const msgs = await fetchMessagesSinceCache(id, s.byConvo[id])
       const normalized = msgs.map(fromApi)
       // Fewer rows than the page cap → we've already got everything older.
       // Equal-to-cap is ambiguous (could be exactly N or N+more) so default
@@ -384,9 +434,7 @@ export const useMessages = create<MessagesState>((set, get) => ({
 
   async reloadConversation(id) {
     try {
-      // Reload pulls the same window the initial load did — last N. Older
-      // history that was already paged in stays in byConvo via the merge.
-      const msgs = await api.getMessages(id, { limit: MESSAGES_PAGE_SIZE })
+      const msgs = await fetchMessagesSinceCache(id, get().byConvo[id])
       const normalized = msgs.map(fromApi)
       const hasMore = normalized.length >= MESSAGES_PAGE_SIZE
       set((s) => ({
@@ -505,17 +553,18 @@ export const useMessages = create<MessagesState>((set, get) => ({
           const sb = (b as { sequence?: number }).sequence ?? 0
           return sa - sb
         })
-        // Live replyCount bump on the quoted-original. Server doesn't publish
-        // the new count separately; without this the "N replies" link on the
-        // root would only catch up on a full refetch. Only bump for fresh
-        // arrivals (`prior` was absent) so a server-echo of an optimistic
-        // bubble doesn't double-count.
-        if (!prior && m.quotedMessageId) {
-          const rootId = m.quotedMessageId
-          next = next.map((x) =>
-            x.id === rootId ? { ...x, replyCount: (x.replyCount ?? 0) + 1 } : x,
-          )
-        }
+        // Live replyCount bump on the quoted-original. The server doesn't
+        // publish the new count separately; without this the "N replies" link
+        // on the root would only catch up on a full refetch.
+        //
+        // Only for FRESH arrivals. A `prior` match means this is the server
+        // echo of our own optimistic bubble, and `sendUserMessage` already
+        // counted it at insert time — which it has to, because the author's
+        // echo ALWAYS matches `prior` (by real id once the POST resolves, or
+        // by clientId when the echo wins the race). Counting only here left
+        // the author's own root one short forever, and at zero that hides the
+        // only entrance to the thread they had just created.
+        if (!prior) next = applyReplyCountDelta(next, m.quotedMessageId, 1)
         const { [m.id]: _drop, ...rest } = s.streaming
         return {
           streaming: rest,
@@ -690,10 +739,19 @@ export async function sendUserMessage(
   // shouldn't shove our bubble up the timeline.
   ;(optimistic as Message & { sequence?: number }).sequence = Number.MAX_SAFE_INTEGER
 
+  // Count the reply against its root now, next to the bubble it belongs to.
+  // The author never gets a second chance: their server echo is always matched
+  // as a `prior` in applyEvent, so the bump there is skipped for them.
+  // `discardFailedMessage` takes it back if this send is thrown away, which is
+  // also what keeps a retry (discard, then send again) balanced at +1.
   useMessages.setState((s) => ({
     byConvo: {
       ...s.byConvo,
-      [convoId]: [...(s.byConvo[convoId] ?? []), optimistic],
+      [convoId]: applyReplyCountDelta(
+        [...(s.byConvo[convoId] ?? []), optimistic],
+        quotedMessageId,
+        1,
+      ),
     },
   }))
 
@@ -740,8 +798,15 @@ export function discardFailedMessage(convoId: string, tempId: string): void {
   useMessages.setState((s) => {
     const list = s.byConvo[convoId]
     if (!list) return s
-    const next = list.filter((m) => m.id !== tempId)
-    if (next.length === list.length) return s
+    const dropped = list.find((m) => m.id === tempId)
+    if (!dropped) return s
+    // Hand back the count this reply took on insert, or the root keeps a
+    // phantom reply for the rest of the session.
+    const next = applyReplyCountDelta(
+      list.filter((m) => m.id !== tempId),
+      dropped.quotedMessageId,
+      -1,
+    )
     return { byConvo: { ...s.byConvo, [convoId]: next } }
   })
 }

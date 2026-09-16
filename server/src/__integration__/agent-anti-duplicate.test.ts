@@ -264,3 +264,254 @@ test('[integration] worklog blocks a duplicate heavy-tool claim from a peer', as
     scopeKey, agentId: agentA, taskType: 'web-search', subject: 'audio editor competitive analysis',
   })
 })
+
+// ─── announce-then-deliver ─────────────────────────────────────────
+//
+// The operating rules in turn.ts REQUIRE an intent message before any work
+// that keeps the asker waiting: "POST A SHORT INTENT MESSAGE first via
+// `cumora reply` … THEN do the work. THEN reply with the actual result. The
+// intent message must be a SEPARATE `cumora reply` call."
+//
+// In a group of three or more, that intent message is then the room's last
+// message and seconds old — exactly what the anti-monologue gate refuses. So
+// the product mandated a flow its own backstop rejected, and the deliverable
+// that came back was the failure notice rather than the answer.
+
+test('[integration] the gate refuses the result that the mandated intent message asked for', async () => {
+  const { agentA, convoId } = await seedGroupWithTwoAgents()
+
+  const intent = await runCli(['--as', agentA, 'reply', convoId, 'Drafting the email now — ~30s'])
+  assert.equal(intent.ok, true, `the intent message the rules require must post: ${intent.text}`)
+
+  // …30 seconds of work later, the actual answer, exactly as the relay used to
+  // send it: no flag.
+  const answer = await runCli(['--as', agentA, 'reply', convoId, 'Here is the draft: ...'])
+  assert.equal(answer.ok, false, 'this is the state being fixed — the gate refuses the deliverable')
+  assert.match(answer.text, /you already posted in/)
+})
+
+test('[integration] the relay delivers that result, body intact', async () => {
+  const { agentA, convoId } = await seedGroupWithTwoAgents()
+  await runCli(['--as', agentA, 'reply', convoId, 'Drafting the email now — ~30s'])
+
+  // The shape turn.ts's declared relay now sends: flag LAST.
+  const body = 'Here is the draft: subject line, three paragraphs, CTA.'
+  const relayed = await runCli(['--as', agentA, 'reply', convoId, body, '--continue'])
+  assert.equal(relayed.ok, true, `the relay must deliver the answer: ${relayed.text}`)
+
+  const { rows } = await pool.query<{ body: string }>(
+    `SELECT body FROM messages WHERE conversation_id = $1 ORDER BY sequence DESC LIMIT 1`,
+    [convoId],
+  )
+  assert.equal(rows[0].body, body, 'the answer must arrive whole, not empty')
+})
+
+test('[unit] the bypass flag has to come after the body', async () => {
+  // parseArgs reads `--continue <token>` as a VALUE flag, so putting the flag
+  // before the body consumes the body and posts an EMPTY message. Pin the
+  // ordering, because moving the flag to the front reads like a tidy-up.
+  //
+  // Asserted on parseArgs directly and unconditionally. The first version of
+  // this test wrapped its assertion in `if (wrongOrder.ok)`, which meant it
+  // could pass without checking anything — thanks to @yetone for catching it.
+  const { parseArgs } = await import('../agents/cli-parse.js')
+
+  const wrong = parseArgs(['reply', 'g-1', '--continue', 'the actual answer'])
+  assert.equal(wrong.flags.continue, 'the actual answer',
+    'parseArgs takes the next token as the flag VALUE')
+  assert.deepEqual(wrong.positional, ['reply', 'g-1'],
+    'so the body is gone entirely — flag-before-body posts an empty message')
+
+  const right = parseArgs(['reply', 'g-1', 'the actual answer', '--continue'])
+  assert.equal(right.flags.continue, true, 'trailing flag parses as a boolean')
+  assert.deepEqual(right.positional, ['reply', 'g-1', 'the actual answer'],
+    'and the body survives')
+})
+
+test('[integration] flag-before-body does not post the body', async () => {
+  // The same trap through the real CLI, asserted unconditionally this time.
+  const { agentA, convoId } = await seedGroupWithTwoAgents()
+  await runCli(['--as', agentA, 'reply', convoId, 'Drafting the email now — ~30s'])
+
+  await runCli(['--as', agentA, 'reply', convoId, '--continue', 'the actual answer'])
+  const { rows } = await pool.query<{ body: string }>(
+    `SELECT body FROM messages WHERE conversation_id = $1 ORDER BY sequence DESC LIMIT 1`,
+    [convoId],
+  )
+  assert.notEqual(
+    rows[0].body, 'the actual answer',
+    'flag-before-body must never be adopted: parseArgs eats the body as the flag value',
+  )
+})
+
+test('[integration] a plain second post is still refused', async () => {
+  // The guard rail: this fix must not turn the gate off. Only the relay, which
+  // carries the flag, gets through.
+  const { agentA, convoId } = await seedGroupWithTwoAgents()
+  await runCli(['--as', agentA, 'reply', convoId, 'first'])
+  const second = await runCli(['--as', agentA, 'reply', convoId, 'monologuing on'])
+  assert.equal(second.ok, false, 'the anti-monologue gate must still hold for ordinary replies')
+})
+
+test('[unit] the declared relay carries the bypass, last', async () => {
+  // Every test above passes just as well against a relay that sends no flag —
+  // they exercise cmdReply, not the caller. Read turn.ts, because the defect
+  // was in what the relay sends.
+  const { readFile } = await import('node:fs/promises')
+  const source = await readFile(new URL('../agents/turn.ts', import.meta.url), 'utf8')
+  const relay = source.slice(source.indexOf('Auto-relayed assistant text as reply'))
+  const block = relay.slice(0, relay.indexOf('if (!relay.ok)'))
+
+  assert.match(
+    block, /command: `cumora reply \$\{target\.conversationId\} \$\{escaped\} --continue`/,
+    'the declared relay no longer bypasses the anti-monologue gate — after the intent message the rules require, the agent\'s answer is refused and the room gets a failure notice instead',
+  )
+})
+
+// ─── announce, then deliver, in the same turn ──────────────────────
+//
+// The operating rules require an intent message before long work, posted as a
+// SEPARATE `cumora reply`, then the result "in this SAME turn". In a group of
+// three or more that intent message is the room's last message and seconds
+// old, which is exactly what the gate refuses — so the flow the product
+// mandates was the flow it rejected, and the answer was lost.
+//
+// #263 fixed the runtime's own auto-relay by giving it --continue. It could
+// not fix this one: `postedReplyViaTool` is set the moment the intent message
+// lands and never reset within a turn, and the relay branch is guarded on
+// `!postedReplyViaTool`, so once the agent announces, the relay is switched
+// off for the rest of that turn. The second post is the model calling
+// `cumora reply` itself, and it reached the gate with nothing to distinguish
+// it from a monologue.
+//
+// The run id is that distinction, and it now reaches the CLI as CUMORA_RUN_ID.
+
+async function withRunId<T>(runId: string | null, fn: () => Promise<T>): Promise<T> {
+  const previous = process.env.CUMORA_RUN_ID
+  if (runId === null) delete process.env.CUMORA_RUN_ID
+  else process.env.CUMORA_RUN_ID = runId
+  try {
+    return await fn()
+  } finally {
+    if (previous === undefined) delete process.env.CUMORA_RUN_ID
+    else process.env.CUMORA_RUN_ID = previous
+  }
+}
+
+test('[integration] the mandated announce-then-deliver flow goes through', async () => {
+  const { agentA, convoId } = await seedGroupWithTwoAgents()
+  const runId = `run-${randomUUID().slice(0, 8)}`
+
+  await withRunId(runId, async () => {
+    const intent = await runCli(['--as', agentA, 'reply', convoId, 'Drafting the email now — ~30s'])
+    assert.equal(intent.ok, true, `the intent message the rules require must post: ${intent.text}`)
+
+    // …30 seconds of work later, the result. Same turn, so same run.
+    const answer = await runCli(['--as', agentA, 'reply', convoId, 'Here is the draft: subject, three paragraphs, CTA.'])
+    assert.equal(answer.ok, true, `the answer the intent message promised must post: ${answer.text}`)
+  })
+
+  const { rows } = await pool.query<{ body: string }>(
+    `SELECT body FROM messages WHERE conversation_id = $1 AND author_id = $2 ORDER BY sequence`,
+    [convoId, agentA],
+  )
+  assert.equal(rows.length, 2, 'the room should have the intent message and the answer')
+  assert.match(rows[1].body, /Here is the draft/)
+})
+
+test('[integration] a later run is still refused — that is the gate doing its job', async () => {
+  // The whole point of the gate: "each wake-up is a fresh 'should I respond?'
+  // decision with no global stop-signal". A different run is a different
+  // decision, however recently the last message landed.
+  const { agentA, convoId } = await seedGroupWithTwoAgents()
+
+  await withRunId(`run-${randomUUID().slice(0, 8)}`, async () => {
+    const first = await runCli(['--as', agentA, 'reply', convoId, 'first'])
+    assert.equal(first.ok, true)
+  })
+  await withRunId(`run-${randomUUID().slice(0, 8)}`, async () => {
+    const second = await runCli(['--as', agentA, 'reply', convoId, 'a fresh decision to talk again'])
+    assert.equal(second.ok, false, 'a new wake-up must not inherit the previous turn\'s exemption')
+    assert.match(second.text, /you already posted in/)
+  })
+})
+
+test('[integration] a third post in one turn is monologuing again', async () => {
+  // Announce + deliver is two. The exemption is capped there on purpose.
+  const { agentA, convoId } = await seedGroupWithTwoAgents()
+  const runId = `run-${randomUUID().slice(0, 8)}`
+
+  await withRunId(runId, async () => {
+    assert.equal((await runCli(['--as', agentA, 'reply', convoId, 'on it'])).ok, true)
+    assert.equal((await runCli(['--as', agentA, 'reply', convoId, 'here it is'])).ok, true)
+    const third = await runCli(['--as', agentA, 'reply', convoId, 'and one more thought'])
+    assert.equal(third.ok, false, 'the exemption must not become an unlimited licence')
+    assert.match(third.text, /you already posted in/)
+  })
+})
+
+test('[integration] a continuation is still checked against a room that moved', async () => {
+  // The guard rail that separates this from --continue. That flag also
+  // disables the freshness preflight; this exemption must not, or an agent
+  // could deliver a stale answer a peer already gave while it was working.
+  const { agentA, agentB, convoId } = await seedGroupWithTwoAgents()
+  const runId = `run-${randomUUID().slice(0, 8)}`
+
+  await withRunId(runId, async () => {
+    assert.equal((await runCli(['--as', agentA, 'reply', convoId, 'on it — ~30s'])).ok, true)
+  })
+  // A peer delivers the same thing while A works.
+  assert.equal((await runCli(['--as', agentB, 'reply', convoId, 'The answer is 42.'])).ok, true)
+
+  await withRunId(runId, async () => {
+    const late = await runCli(['--as', agentA, 'reply', convoId, 'The answer is 42.'])
+    assert.equal(late.ok, false, 'the freshness preflight must still apply to a same-turn delivery')
+    assert.match(late.text, /HELD/)
+  })
+})
+
+test('[integration] with no run id the gate behaves exactly as before', async () => {
+  // The CLI, replay and boot paths carry no CUMORA_RUN_ID. They must not get
+  // an exemption they cannot justify.
+  const { agentA, convoId } = await seedGroupWithTwoAgents()
+  await withRunId(null, async () => {
+    assert.equal((await runCli(['--as', agentA, 'reply', convoId, 'first'])).ok, true)
+    const second = await runCli(['--as', agentA, 'reply', convoId, 'second'])
+    assert.equal(second.ok, false, 'no run id means no exemption')
+    assert.match(second.text, /you already posted in/)
+  })
+})
+
+// ─── exit 2 means HELD, and only that ──────────────────────────────
+//
+// turn.ts now reads the exit code to tell a deliberate stand-down apart from a
+// crash: a HELD relay ends the turn as `skipped` instead of posting "Agent run
+// failed … No result was produced" into a room where a peer just delivered.
+// That only works while 2 means exactly one thing.
+
+test('[integration] a HELD reply exits 2, an ordinary refusal exits 1', async () => {
+  const { agentA, agentB, convoId } = await seedGroupWithTwoAgents()
+
+  await runCli(['--as', agentB, 'reply', convoId, 'The answer is 42.'])
+  const held = await runCli(['--as', agentA, 'reply', convoId, 'The answer is 42.'])
+  assert.equal(held.ok, false)
+  assert.match(held.text, /HELD/)
+  assert.equal(held.exitCode, 2, 'HELD must be distinguishable from a crash by exit code alone')
+
+  // A refusal that is not a stand-down: nothing was deliberately declined, the
+  // caller simply asked for something impossible.
+  const usage = await runCli(['--as', agentA, 'reply'])
+  assert.equal(usage.ok, false)
+  assert.equal(usage.exitCode, 1, 'an ordinary error must not masquerade as HELD')
+})
+
+test('[unit] the top-level catch-all does not claim to be a hold', async () => {
+  // An unexpected exception is not "your write was declined, re-decide and
+  // retry" — and it used to exit 2, which is what made the code ambiguous.
+  const { readFile } = await import('node:fs/promises')
+  const source = await readFile(new URL('../agents/cli.ts', import.meta.url), 'utf8')
+  const tail = source.slice(source.lastIndexOf('} catch (e) {'))
+
+  assert.match(tail, /err\(`error: \$\{e instanceof Error \? e\.message : String\(e\)\}`, 1\)/,
+    'the catch-all exits 2 again, so turn.ts can no longer tell a deliberate stand-down from a crash')
+})
