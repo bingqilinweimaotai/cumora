@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { api, ws, type ApiDocument } from '@/api/client'
 import { pendingCreateRequestId } from '@/lib/create-idempotency'
+import { commitIfContextCurrent } from '@/stores/auth'
 
 interface DocumentsState {
   list: ApiDocument[]
@@ -25,16 +26,20 @@ export const useDocuments = create<DocumentsState>((set, get) => ({
   select: (id) => set({ selectedId: id }),
   load: async () => {
     if (get().loaded) return
-    const { documents } = await api.listDocuments()
-    set({ list: documents, loaded: true })
+    await commitIfContextCurrent(
+      () => api.listDocuments(),
+      ({ documents }) => set({ list: documents, loaded: true }),
+    )
   },
   reload: async () => {
-    const { documents } = await api.listDocuments()
-    set((s) => ({
-      list: documents,
-      loaded: true,
-      selectedId: s.selectedId && documents.some((d) => d.id === s.selectedId) ? s.selectedId : null,
-    }))
+    await commitIfContextCurrent(
+      () => api.listDocuments(),
+      ({ documents }) => set((s) => ({
+        list: documents,
+        loaded: true,
+        selectedId: s.selectedId && documents.some((d) => d.id === s.selectedId) ? s.selectedId : null,
+      })),
+    )
   },
   reset: () => set({ list: [], loaded: false, selectedId: null }),
   create: async (input) => {

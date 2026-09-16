@@ -4,6 +4,7 @@ import type {
   BoardSummary, BoardSnapshot, BoardCard, BoardCardComment, BoardCardLookup,
 } from '@/types'
 import { pendingCreateRequestId } from '@/lib/create-idempotency'
+import { commitIfContextCurrent, useAuth } from '@/stores/auth'
 
 interface BoardsState {
   /** Workspace-wide list of board summaries. Loaded once on view mount;
@@ -92,12 +93,15 @@ export const useBoards = create<BoardsState>((set, get) => ({
   loadingCardId: null,
 
   loadList: async () => {
+    const epoch = useAuth.getState().contextEpoch
     set({ loadingList: true })
     try {
-      const rows = await api.listBoards()
-      set({ list: rows })
+      await commitIfContextCurrent(
+        () => api.listBoards(),
+        (list) => set({ list }),
+      )
     } finally {
-      set({ loadingList: false })
+      if (useAuth.getState().contextEpoch === epoch) set({ loadingList: false })
     }
   },
 
