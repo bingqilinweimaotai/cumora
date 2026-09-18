@@ -822,29 +822,39 @@ function missingEngineMessage(): string {
   ].join('\n')
 }
 
-function sandboxedEngineMessage(installed: readonly EngineId[]): string {
+function unsandboxedCompatibilityHint(platform: NodeJS.Platform): string {
+  return platform === 'win32'
+    ? [
+        '  PowerShell:',
+        "    $env:CUMORA_BYOA_ALLOW_UNSANDBOXED = '1'",
+        '    # Then rerun your original Cumora command in this PowerShell session.',
+      ].join('\n')
+    : '  CUMORA_BYOA_ALLOW_UNSANDBOXED=1 npx cumora@latest agent computer ...'
+}
+
+function sandboxedEngineMessage(installed: readonly EngineId[], platform: NodeJS.Platform = process.platform): string {
   return [
     `installed engines are disabled by Cumora's secure BYOA default: ${installed.join(', ')}`,
     '',
-    process.platform === 'win32'
+    platform === 'win32'
       ? 'Use Codex on native Windows, or run Claude Code inside WSL2.'
       : 'Install and sign in to Claude Code or Codex.',
     'Grok, Cursor, OpenCode, pi, Gemini, Qwen, Antigravity, and native-Windows Claude currently lack',
     'a Cumora-verified fail-closed host boundary.',
     '',
     'Compatibility only (grants the model your host files, environment, and network):',
-    '  CUMORA_BYOA_ALLOW_UNSANDBOXED=1 npx cumora@latest agent computer ...',
+    unsandboxedCompatibilityHint(platform),
   ].join('\n')
 }
 
-function incapableEngineMessage(blocked: ReadonlyArray<{ id: EngineId; reason: string }>): string {
+function incapableEngineMessage(blocked: ReadonlyArray<{ id: EngineId; reason: string }>, platform: NodeJS.Platform = process.platform): string {
   return [
     'installed secure engines cannot enforce Cumora\'s BYOA boundary:',
     ...blocked.map(({ id, reason }) => `  - ${id}: ${reason}`),
     '',
     'Update the CLI and install any named sandbox dependencies, then retry.',
     'Compatibility only (disables this capability gate and host boundary):',
-    '  CUMORA_BYOA_ALLOW_UNSANDBOXED=1 npx cumora@latest agent computer ...',
+    unsandboxedCompatibilityHint(platform),
   ].join('\n')
 }
 
@@ -899,6 +909,30 @@ async function blockedSnapshotRows(
   }))
 }
 
+/** Diagnose an explicit choice without confusing installation with permission
+ * to run. Both inventories come from the same scan. */
+export function validatePairingEngine(
+  preferredEngine: string,
+  installed: readonly EngineId[],
+  evaluated: RunnableEngineEvaluation,
+  platform: NodeJS.Platform = process.platform,
+): void {
+  if (!ENGINE_IDS.includes(preferredEngine as EngineId)) {
+    throw new Error(`--engine must be one of: ${ENGINE_IDS.join(', ')} (got "${preferredEngine}")`)
+  }
+  const id = preferredEngine as EngineId
+  if (!installed.includes(id)) {
+    throw new Error(`--engine ${id} chosen, but ${id} was not found on PATH. Installed: ${installed.join(', ') || 'none'}.`)
+  }
+  if (!evaluated.runnable.includes(id)) {
+    const blocked = evaluated.blocked.find((entry) => entry.id === id)
+    throw new Error([
+      `--engine ${id} chosen: ${id} is installed but cannot run under Cumora's secure BYOA default.`,
+      blocked ? incapableEngineMessage([blocked], platform) : sandboxedEngineMessage([id], platform),
+    ].join('\n\n'))
+  }
+}
+
 /** The engines this machine can run, plus the ones it cannot and why.
  *
  *  The refusals used to stop at the console.warn below. Pairing then reported
@@ -906,13 +940,16 @@ async function blockedSnapshotRows(
  *  engine that was skipped until the first PATH rescan minutes later — which is
  *  precisely the window in which someone asks why their Claude Code is not
  *  listed. */
-async function requireLocalEngine(): Promise<RunnableEngineEvaluation> {
+async function requireLocalEngine(preferredEngine?: string): Promise<RunnableEngineEvaluation> {
   const detected = await detectEnginesWithStatus()
   if (!detected.reliable) {
     throw new Error('could not scan PATH (`which` / `where` failed). Fix that, then retry pairing.')
   }
-  if (detected.engines.length === 0) throw new Error(missingEngineMessage())
   const evaluated = await evaluateRunnableEngines(detected.engines)
+  // Check the requested engine against the raw PATH inventory first. The
+  // runnable list excludes installed engines refused by the security policy.
+  if (preferredEngine) validatePairingEngine(preferredEngine, detected.engines, evaluated)
+  if (detected.engines.length === 0) throw new Error(missingEngineMessage())
   if (evaluated.runnable.length === 0) {
     if (evaluated.blocked.length > 0) throw new Error(incapableEngineMessage(evaluated.blocked))
     throw new Error(sandboxedEngineMessage(detected.engines))
@@ -1458,21 +1495,15 @@ async function detectHostName(): Promise<string> {
 }
 
 async function doPair(code: string, serverUrl: string, preferredEngine?: string): Promise<void> {
-  const evaluated = await requireLocalEngine()
-  const detected = evaluated.runnable
+  const evaluated = await requireLocalEngine(preferredEngine)
+  const runnable = evaluated.runnable
   // The chosen engine becomes this computer's DEFAULT — it's sent first in the
   // engines list, which the server stores as available_engines[0] and uses as
   // the engine for the starter team and any agent assigned here without an
   // explicit override. (No separate column needed: "first = default".)
-  let engines = [...detected]
+  let engines = [...runnable]
   if (preferredEngine) {
-    if (!ENGINE_IDS.includes(preferredEngine as EngineId)) {
-      throw new Error(`--engine must be one of: ${ENGINE_IDS.join(', ')} (got "${preferredEngine}")`)
-    }
-    if (!detected.includes(preferredEngine as EngineId)) {
-      throw new Error(`--engine ${preferredEngine} chosen, but ${preferredEngine} is not installed on this machine. Installed: ${detected.join(', ') || 'none'}.`)
-    }
-    engines = [preferredEngine as EngineId, ...detected.filter((e) => e !== preferredEngine)]
+    engines = [preferredEngine as EngineId, ...runnable.filter((e) => e !== preferredEngine)]
   }
   const blockedIds = evaluated.blocked.map(({ id }) => id)
   const snapshot = [
