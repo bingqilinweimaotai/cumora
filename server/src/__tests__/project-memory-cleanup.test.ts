@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { cleanupDeletedProjectMemories } from '../agents/computer/project-memory-cleanup.js'
+import { cleanupDeletedProjectMemories, localProjectMemoryTargets } from '../agents/computer/project-memory-cleanup.js'
 
 test('local cleanup removes only the deleted project, and retries late writes', async () => {
   const root = await mkdtemp(join(tmpdir(), 'cumora-project-cleanup-'))
@@ -15,6 +15,7 @@ test('local cleanup removes only the deleted project, and retries late writes', 
     }
     await writeFile(join(home, 'memory/MEMORY.md'), 'global memory')
     const deletions = [{ projectId: 'p-delete', agentIds: ['a-one', 'a-offline'] }]
+    assert.deepEqual(await localProjectMemoryTargets(root, 'p-delete'), { projectId: 'p-delete', agentIds: ['a-one'] })
     await cleanupDeletedProjectMemories(root, deletions)
     await assert.rejects(readFile(join(home, 'memory/projects/p-delete/note.md')), { code: 'ENOENT' })
     assert.equal(await readFile(join(home, 'memory/MEMORY.md'), 'utf8'), 'global memory')
@@ -25,6 +26,7 @@ test('local cleanup removes only the deleted project, and retries late writes', 
     await writeFile(join(home, 'memory/projects/p-delete/late.md'), 'late write')
     await cleanupDeletedProjectMemories(root, deletions)
     await cleanupDeletedProjectMemories(root, deletions)
+    assert.deepEqual(await localProjectMemoryTargets(root, 'p-delete'), { projectId: 'p-delete', agentIds: [] })
     await assert.rejects(readFile(join(home, 'memory/projects/p-delete/late.md')), { code: 'ENOENT' })
   } finally { await rm(root, { recursive: true, force: true }) }
 })
@@ -38,6 +40,7 @@ test('local cleanup rejects traversal and never follows an agent directory junct
     await mkdir(join(outside, 'memory/projects/p-delete'), { recursive: true })
     const note = join(outside, 'memory/projects/p-delete/note.md')
     await writeFile(note, 'preserve')
+    await assert.rejects(localProjectMemoryTargets(agents, '../outside'), /invalid project/)
     await cleanupDeletedProjectMemories(agents, [
       { projectId: 'p-delete', agentIds: ['../outside', '..\\outside'] },
       { projectId: '../outside', agentIds: ['a-one'] },

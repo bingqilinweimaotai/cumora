@@ -5,6 +5,8 @@ import { after, before, beforeEach, test } from 'node:test'
 import { pool } from '../db/pool.js'
 import { isRuntimeAgentAuthorized } from '../agents/runtime/authorization.js'
 import { drainWorkspaceCleanupJobs } from '../workspace-cleanup.js'
+import { drainProjectMemoryDeletions } from '../project-deletion.js'
+import { assertMemoryProjectExists } from '../agents/memory-write.js'
 import { buildApiTestApp, ensureSchemaOnce, resetAllTables, teardownAll } from './_helpers.js'
 
 const OWNER_ID = 'u-workspace-owner'
@@ -101,7 +103,7 @@ test('[integration] archived projects can be permanently deleted without deletin
     [JSON.stringify([OWNER_ID])],
   )
   const response = await fetch(`${ownerBase}/api/projects/p-delete`, {
-    method: 'DELETE', headers: companyHeaders('co-managed'),
+    method: 'DELETE', headers: companyHeaders('co-managed'), body: JSON.stringify({ confirmation: 'Archived project' }),
   })
   assert.equal(response.status, 200)
   assert.equal((await pool.query(`SELECT 1 FROM projects WHERE id = 'p-delete'`)).rowCount, 0)
@@ -122,19 +124,24 @@ test('[integration] project deletion requires an archived project in an administ
      ('p-other', 'co-other-project', 'Other', 'archived')`,
   )
   const denied = await fetch(`${targetBase}/api/projects/p-archived`, {
-    method: 'DELETE', headers: companyHeaders('co-managed'),
+    method: 'DELETE', headers: companyHeaders('co-managed'), body: JSON.stringify({ confirmation: 'Archived' }),
   })
   assert.equal(denied.status, 403)
   for (const id of ['p-active', 'p-other', 'p-missing']) {
     const response = await fetch(`${ownerBase}/api/projects/${id}`, {
-      method: 'DELETE', headers: companyHeaders('co-managed'),
+      method: 'DELETE', headers: companyHeaders('co-managed'), body: JSON.stringify({ confirmation: id === 'p-active' ? 'Active' : 'Other' }),
     })
     assert.equal(response.status, 404)
   }
   assert.equal((await pool.query(`SELECT 1 FROM projects`)).rowCount, 3)
+  const wrongName = await fetch(`${ownerBase}/api/projects/p-archived`, {
+    method: 'DELETE', headers: companyHeaders('co-managed'), body: JSON.stringify({ confirmation: 'wrong name' }),
+  })
+  assert.equal(wrongName.status, 404)
+  assert.equal((await pool.query(`SELECT 1 FROM projects`)).rowCount, 3)
   await pool.query(`UPDATE company_members SET role = 'admin' WHERE company_id = 'co-managed' AND user_id = $1`, [TARGET_ID])
   const allowed = await fetch(`${targetBase}/api/projects/p-archived`, {
-    method: 'DELETE', headers: companyHeaders('co-managed'),
+    method: 'DELETE', headers: companyHeaders('co-managed'), body: JSON.stringify({ confirmation: 'Archived' }),
   })
   assert.equal(allowed.status, 200)
 })
@@ -164,21 +171,79 @@ test('[integration] archive preserves memory; delete clears scoped and pinned me
   assert.equal(archive.status, 200)
   assert.equal((await pool.query('SELECT 1 FROM agent_workspace')).rowCount, entries.length)
   const response = await fetch(`${ownerBase}/api/projects/p-memory`, {
-    method: 'DELETE', headers: companyHeaders('co-managed'),
+    method: 'DELETE', headers: companyHeaders('co-managed'), body: JSON.stringify({ confirmation: 'Memory project' }),
   })
   assert.equal(response.status, 200)
   const remaining = await pool.query(`SELECT agent_id, path FROM agent_workspace ORDER BY agent_id, path`)
   assert.deepEqual(remaining.rows, entries.slice(3).map(([agent_id, , path]) => ({ agent_id, path })))
-  assert.deepEqual((await pool.query(`SELECT agent_ids FROM project_memory_deletions WHERE company_id = 'co-managed' AND project_id = 'p-memory'`)).rows,
-    [{ agent_ids: ['a-local'] }])
+  assert.equal((await pool.query(`SELECT 1 FROM project_memory_deletions WHERE company_id = 'co-managed' AND project_id = 'p-memory'`)).rowCount, 1)
   for (const [path, meta] of [
     ['memory/projects/p-memory/late.md', null],
     ['memory/note/late.md', { pinned: true, source: { projectId: 'p-memory' } }],
   ] as const) {
-    await assert.rejects(pool.query(
+    await assert.rejects(assertMemoryProjectExists('co-managed', path, meta), /deleted or unknown project/)
+    // Simulate an INSERT already in flight when the project was deleted.
+    await pool.query(
       `INSERT INTO agent_workspace (agent_id, company_id, path, body, meta) VALUES ('a-local', 'co-managed', $1, 'late', $2::jsonb)`,
       [path, JSON.stringify(meta)],
-    ), { code: '23514' })
+    )
+  }
+  await pool.query(`UPDATE project_memory_deletions SET next_cleanup_at = NOW() WHERE project_id = 'p-memory'`)
+  await drainProjectMemoryDeletions()
+  assert.deepEqual((await pool.query(`SELECT agent_id, path FROM agent_workspace ORDER BY agent_id, path`)).rows, remaining.rows)
+  assert.equal((await pool.query(`SELECT 1 FROM project_memory_deletions WHERE project_id = 'p-memory'`)).rowCount, 0)
+})
+
+test('[integration] project cleanup survives offline devices and scopes acknowledgements to the device tenant', async () => {
+  await seedOwnedWorkspace()
+  await seedCompany('co-cleanup-other', OWNER_ID)
+  await pool.query(`INSERT INTO projects (id, company_id, name, status) VALUES ('p-offline', 'co-managed', 'Offline', 'archived')`)
+  for (const [id, tenant] of [['device-one', 'co-managed'], ['device-two', 'co-managed'], ['device-other', 'co-cleanup-other']]) {
+    await pool.query(
+      `INSERT INTO computers (id, company_id, name, kind, credential_hash) VALUES ($1, $2, $1, 'local', $3)`,
+      [id, tenant, createHash('sha256').update(`token-${id}`).digest('hex')],
+    )
+  }
+  const remove = await fetch(`${ownerBase}/api/projects/p-offline`, {
+    method: 'DELETE', headers: companyHeaders('co-managed'), body: JSON.stringify({ confirmation: 'Offline' }),
+  })
+  assert.equal(remove.status, 200)
+  const pending = async (id: string) => {
+    const response = await fetch(`${ownerBase}/api/computers/deleted-project-memories`, { headers: { authorization: `Bearer token-${id}` } })
+    assert.equal(response.status, 200)
+    return response.json()
+  }
+  const ack = (id: string) => fetch(`${ownerBase}/api/computers/deleted-project-memories/p-offline/ack`, {
+    method: 'POST', headers: { authorization: `Bearer token-${id}` },
+  })
+  assert.deepEqual(await pending('device-one'), [{ projectId: 'p-offline' }])
+  assert.deepEqual(await pending('device-other'), [])
+  assert.equal((await ack('device-other')).status, 200)
+  assert.deepEqual(await pending('device-one'), [{ projectId: 'p-offline' }])
+  assert.equal((await ack('device-one')).status, 200)
+  assert.equal((await ack('device-one')).status, 200)
+  assert.deepEqual(await pending('device-one'), [])
+  await pool.query(`UPDATE project_memory_deletions SET next_cleanup_at = NOW() WHERE project_id = 'p-offline'`)
+  await drainProjectMemoryDeletions()
+  assert.deepEqual(await pending('device-two'), [{ projectId: 'p-offline' }], 'offline work must not expire')
+  assert.equal((await ack('device-two')).status, 200)
+  await pool.query(`UPDATE project_memory_deletions SET next_cleanup_at = NOW() WHERE project_id = 'p-offline'`)
+  await drainProjectMemoryDeletions()
+  assert.equal((await pool.query(`SELECT 1 FROM project_memory_deletions WHERE project_id = 'p-offline'`)).rowCount, 0)
+})
+
+test('[integration] compatibility rollout disables project deletion safely before migration 0010', async () => {
+  await seedOwnedWorkspace()
+  await pool.query(`INSERT INTO projects (id, company_id, name, status) VALUES ('p-before-migration', 'co-managed', 'Before migration', 'archived')`)
+  await pool.query(`ALTER TABLE project_memory_deletions RENAME TO project_memory_deletions_test_hidden`)
+  try {
+    const response = await fetch(`${ownerBase}/api/projects/p-before-migration`, {
+      method: 'DELETE', headers: companyHeaders('co-managed'), body: JSON.stringify({ confirmation: 'Before migration' }),
+    })
+    assert.equal(response.status, 503)
+    assert.equal((await pool.query(`SELECT 1 FROM projects WHERE id = 'p-before-migration'`)).rowCount, 1)
+  } finally {
+    await pool.query(`ALTER TABLE project_memory_deletions_test_hidden RENAME TO project_memory_deletions`)
   }
 })
 

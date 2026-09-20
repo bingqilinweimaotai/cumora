@@ -9,7 +9,7 @@ import { pool } from '../db/pool.js'
 import { CH_MESSAGE_NEW, CH_REACTIONS, CH_CONVO_UPDATED, CH_DOCS, CH_TYPING, CH_CALENDAR_EVENTS, CH_BOARDS, CH_STATUS, CH_WORKSPACES, publish } from '../redis.js'
 import { enqueueBroadcast, nudgeRealtimeOutbox, withOutboxTransaction } from '../realtime-outbox.js'
 import { enqueueWorkspaceCleanup, nudgeWorkspaceCleanupWorker } from '../workspace-cleanup.js'
-import { deleteArchivedProject } from '../project-deletion.js'
+import { deleteArchivedProject, projectDeletionAvailable } from '../project-deletion.js'
 import { collectDocumentStorageKeys, evictDocumentRoom } from '../documents/rooms.js'
 import { createPoll, castVote, closePoll, PollError } from '../polls.js'
 import { env } from '../env.js'
@@ -1378,7 +1378,7 @@ api.get('/computers/me/agents', safe(async (req, res) => {
 // Daemon liveness heartbeat — keeps the computer 'online' (an offline sweep
 // flips it once heartbeats go stale).
 api.post('/computers/heartbeat', safe(async (req, res) => {
-  const { computerId, companyId } = await requireDevice(req)
+  const { computerId } = await requireDevice(req)
   const version = typeof req.body?.version === 'string' ? req.body.version : undefined
   const supervised = typeof req.body?.supervised === 'boolean' ? req.body.supervised : undefined
   // Engines the daemon can currently see on PATH. Optional: an older daemon
@@ -1387,12 +1387,29 @@ api.post('/computers/heartbeat', safe(async (req, res) => {
     ? (req.body.engines as unknown[]).filter((e): e is string => typeof e === 'string')
     : undefined
   const detectRequested = await heartbeatComputer(computerId, version, supervised, engines)
-  const { rows: deletedProjectMemories } = await pool.query(
-    `SELECT project_id AS "projectId", agent_ids AS "agentIds"
-       FROM project_memory_deletions WHERE company_id = $1`,
-    [companyId],
+  res.json({ ok: true, detectRequested })
+}))
+
+api.get('/computers/deleted-project-memories', safe(async (req, res) => {
+  const { computerId, companyId } = await requireDevice(req)
+  if (!await projectDeletionAvailable()) { res.json([]); return }
+  const { rows } = await pool.query(
+    `SELECT project_id AS "projectId" FROM project_memory_deletions
+     WHERE company_id = $1 AND $2 = ANY(pending_computer_ids)
+     ORDER BY deleted_at, project_id LIMIT 50`,
+    [companyId, computerId],
   )
-  res.json({ ok: true, detectRequested, deletedProjectMemories })
+  res.json(rows)
+}))
+
+api.post('/computers/deleted-project-memories/:id/ack', safe(async (req, res) => {
+  const { computerId, companyId } = await requireDevice(req)
+  await pool.query(
+    `UPDATE project_memory_deletions SET pending_computer_ids = array_remove(pending_computer_ids, $2)
+     WHERE company_id = $1 AND project_id = $3 AND $2 = ANY(pending_computer_ids)`,
+    [companyId, computerId, req.params.id],
+  )
+  res.json({ ok: true })
 }))
 
 // Mint a per-agent runtime JWT for the calling computer (daemon refresh loop).
@@ -2410,8 +2427,16 @@ api.post('/projects/:id/archive', async (req, res) => {
 
 api.delete('/projects/:id', async (req, res) => {
   const { companyId: tenant } = await requireCompanyRole(req)
-  if (!await deleteArchivedProject(tenant, req.params.id)) {
-    res.status(404).json({ error: 'archived project not found' })
+  if (!await projectDeletionAvailable()) {
+    res.status(503).json({ error: 'Project deletion requires schema migration 0010.' })
+    return
+  }
+  if (typeof req.body?.confirmation !== 'string') {
+    res.status(400).json({ error: 'project name confirmation required' })
+    return
+  }
+  if (!await deleteArchivedProject(tenant, req.params.id, req.body.confirmation)) {
+    res.status(404).json({ error: 'archived project not found or name does not match' })
     return
   }
   res.json({ ok: true })

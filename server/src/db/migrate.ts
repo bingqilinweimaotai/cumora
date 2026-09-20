@@ -13,6 +13,8 @@ import {
   type AppliedMigration,
   type MigrationMetadata,
   SCHEMA_MIGRATIONS,
+  MAX_SUPPORTED_SCHEMA_VERSION,
+  schemaMigrationTarget,
   validateMigrationHistory,
 } from './migrations/manifest.js'
 import {
@@ -2733,7 +2735,8 @@ function validateMigrationDefinitions(): void {
  * The advisory lock is defense in depth for an accidentally duplicated
  * pre-deploy job. Normal server startup never calls this function.
  */
-export async function ensureSchema(): Promise<void> {
+export async function ensureSchema(targetVersion = MAX_SUPPORTED_SCHEMA_VERSION): Promise<void> {
+  schemaMigrationTarget(String(targetVersion))
   validateMigrationDefinitions()
   const client = await pool.connect()
   try {
@@ -2762,6 +2765,7 @@ export async function ensureSchema(): Promise<void> {
 
       const history = validateMigrationHistory(await readHistory(), { allowPending: true })
       for (const metadata of history.pending) {
+        if (metadata.version > targetVersion) break
         const migration = VERSIONED_MIGRATIONS.find((candidate) => candidate.version === metadata.version)
         if (!migration) throw new Error(`migration ${metadata.version} has metadata but no implementation`)
 
