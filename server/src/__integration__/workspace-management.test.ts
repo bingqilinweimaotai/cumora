@@ -201,7 +201,7 @@ test('[integration] project cleanup survives offline devices and scopes acknowle
   for (const [id, tenant] of [['device-one', 'co-managed'], ['device-two', 'co-managed'], ['device-other', 'co-cleanup-other']]) {
     await pool.query(
       `INSERT INTO computers (id, company_id, name, kind, credential_hash) VALUES ($1, $2, $1, 'local', $3)`,
-      [id, tenant, createHash('sha256').update(`token-${id}`).digest('hex')],
+      [id, tenant, createHash('sha256').update(`token-${id}`).digest('base64url')],
     )
   }
   const remove = await fetch(`${ownerBase}/api/projects/p-offline`, {
