@@ -191,7 +191,7 @@ export function WorkspaceSettingsModal({ company, companyCount, onInvite, onClos
             <p className="mt-1 text-[11.5px] leading-relaxed text-ink-500">
               {companyCount <= 1 ? t('workspace.onlyWorkspace') : t('workspace.deleteHelp')}
             </p>
-            <label className="block mt-3 text-[10.5px] font-semibold uppercase tracking-wide text-ink-400">
+            <label className="block mt-3 text-[10.5px] font-semibold tracking-wide text-ink-400">
               {t('workspace.typeName', { name: company.name })}
             </label>
             <div className="mt-1.5 flex gap-2">
