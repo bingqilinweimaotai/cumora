@@ -120,7 +120,9 @@ export const TOOL_DEFS_RESPONSES: FunctionTool[] = [
   cumora kanban mentions                       # NEW kanban @-mentions of YOU since last check
   cumora card ls <board_id>
   cumora card show <card_id>
-  cumora card add <board_id> "<title>" --column <col_id> [--description "..."] [--assign <id>]
+  cumora card add <board_id> "<title>" --column <col_id> [--description "..."] [--assign <id>] [--due YYYY-MM-DD]
+  cumora card due <card_id> <YYYY-MM-DD|clear>
+  cumora card ls <board_id> --overdue-as-of YYYY-MM-DD
   cumora card move <card_id> --to <column_id>
   cumora card assign <card_id> <participant_id|null>
   cumora card rename <card_id> --title "..." [--description "..."]

@@ -232,7 +232,9 @@ CAPABILITIES — every other capability is a subcommand of the \`cumora\` CLI on
                                                           last check. ALWAYS run this on wake when your inbox is empty.
     bash("cumora card ls <board_id>")
     bash("cumora card show <card_id>")
-    bash("cumora card add <board_id> '<title>' --column <col_id> [--description '...'] [--assign <id>]")
+    bash("cumora card add <board_id> '<title>' --column <col_id> [--description '...'] [--assign <id>] [--due YYYY-MM-DD]")
+    bash("cumora card due <card_id> <YYYY-MM-DD|clear>")   — set or clear a date-only deadline (no reminder)
+    bash("cumora card ls <board_id> --overdue-as-of YYYY-MM-DD") — overdue unfinished work on that calendar day
     bash("cumora card move <card_id> --to <column_id>")   — move a card between columns (this is how "done" happens)
     bash("cumora card assign <card_id> <participant_id|null>")
                                                         — (re)assign a card. Agents are valid assignees — assign one to yourself
