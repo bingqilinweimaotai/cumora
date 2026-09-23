@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import { api, ws, type CalendarEventInput } from '@/api/client'
 import type { CalendarEvent, CalendarEventStatus } from '@/types'
 import { pendingCreateRequestId } from '@/lib/create-idempotency'
+import { commitIfContextCurrent, useAuth } from '@/stores/auth'
 
 interface CalendarState {
   events: CalendarEvent[]
@@ -42,13 +43,7 @@ export const useCalendar = create<CalendarState>((set, get) => ({
 
   async load() {
     if (get().loaded || get().loading) return
-    set({ loading: true, error: null })
-    try {
-      const { events } = await api.listCalendarEvents()
-      set({ events: events.sort(byStart), loaded: true, loading: false })
-    } catch (err) {
-      set({ loading: false, error: err instanceof Error ? err.message : String(err) })
-    }
+    await get().reload()
   },
 
   async loadEvent(id) {
@@ -77,12 +72,17 @@ export const useCalendar = create<CalendarState>((set, get) => ({
   },
 
   async reload() {
+    const epoch = useAuth.getState().contextEpoch
     set({ loading: true, error: null })
     try {
-      const { events } = await api.listCalendarEvents()
-      set({ events: events.sort(byStart), loaded: true, loading: false })
+      await commitIfContextCurrent(
+        () => api.listCalendarEvents(),
+        ({ events }) => set({ events: events.sort(byStart), loaded: true, loading: false }),
+      )
     } catch (err) {
-      set({ loading: false, error: err instanceof Error ? err.message : String(err) })
+      if (useAuth.getState().contextEpoch === epoch) {
+        set({ loading: false, error: err instanceof Error ? err.message : String(err) })
+      }
     }
   },
 

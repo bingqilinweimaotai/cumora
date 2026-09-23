@@ -27,8 +27,7 @@ export function ensureSchemaOnce(): Promise<void> {
   return schemaReady
 }
 
-/** Tables we wipe between tests. Order matters when there are FK
- *  constraints; CASCADE on the parents handles it but listing explicitly
+/** Tables we wipe between tests. CASCADE handles FK constraints, but listing explicitly
  *  keeps the intent visible + lets us spot-check leakage. */
 const TABLES_TO_WIPE: readonly string[] = [
   'workspace_cleanup_jobs',
@@ -99,8 +98,16 @@ export async function resetAllTables(): Promise<void> {
     throw new Error(`refusing to TRUNCATE — DATABASE_URL doesn't look like a test DB: ${env.DATABASE_URL}`)
   }
   await ensureSchemaOnce()
-  for (const t of TABLES_TO_WIPE) {
-    await pool.query(`TRUNCATE TABLE ${t} CASCADE`).catch(() => { /* table may not exist on partial schemas */ })
+  // Partial schemas may omit tables. Resolve the allowlist first instead of
+  // swallowing every TRUNCATE error (which could leave stale test data).
+  const { rows } = await pool.query<{ name: string }>(
+    'SELECT name FROM unnest($1::text[]) AS tables(name) WHERE to_regclass(name) IS NOT NULL',
+    [TABLES_TO_WIPE],
+  )
+  if (rows.length > 0) {
+    // One transaction avoids repeatedly truncating the same FK descendants
+    // and syncing dozens of separate commits before every test.
+    await pool.query(`TRUNCATE TABLE ${rows.map(({ name }) => name).join(', ')} CASCADE`)
   }
 }
 

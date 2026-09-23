@@ -590,17 +590,59 @@ export async function sweepOfflineComputers(staleMs = COMPUTER_STALE_MS): Promis
   for (const r of rows) await broadcastComputerStatus(r.id, r.company_id, 'offline')
 }
 
+/** How long resolveDevice trusts its own last_seen_at bump before writing
+ *  again. Every device-token request used to be an UPDATE; with ~870 daemons
+ *  each sending several requests a minute that row write (and its LWLock
+ *  wait) was ~10% of production DB time for a timestamp nobody reads at that
+ *  granularity: sweepOfflineComputers only asks "older than COMPUTER_STALE_MS
+ *  (90s)?", and the daemon's own 30s heartbeat bumps the column anyway. Kept
+ *  at a third of the stale window so a replica that only ever sees device
+ *  requests (no heartbeat) still keeps the computer online. */
+export const RESOLVE_DEVICE_TOUCH_MS = 30_000
+const deviceTouchedAt = new Map<string, number>()
+const DEVICE_TOUCH_MAP_CAP = 10_000
+
+function rememberDeviceTouch(hash: string, now: number): void {
+  if (deviceTouchedAt.size >= DEVICE_TOUCH_MAP_CAP) {
+    for (const [key, at] of deviceTouchedAt) if (now - at >= RESOLVE_DEVICE_TOUCH_MS) deviceTouchedAt.delete(key)
+    if (deviceTouchedAt.size >= DEVICE_TOUCH_MAP_CAP) deviceTouchedAt.clear()
+  }
+  deviceTouchedAt.set(hash, now)
+}
+
+/** Test hook: forget every remembered bump so the next call writes again. */
+export function resetDeviceTouches(): void {
+  deviceTouchedAt.clear()
+}
+
 /** Resolve a device token (Bearer) to its computer. Rejects revoked devices.
- *  Bumps last_seen_at as a cheap liveness heartbeat. */
+ *  Bumps last_seen_at as a cheap liveness heartbeat, at most once per
+ *  RESOLVE_DEVICE_TOUCH_MS per token; in between it is a plain indexed read,
+ *  so revocation still takes effect on the very next request. */
 export async function resolveDevice(token: string): Promise<{ computerId: string; companyId: string } | null> {
   if (!token) return null
+  const hash = hashToken(token)
+  const now = Date.now()
+  const touched = deviceTouchedAt.get(hash)
+  if (touched !== undefined && now - touched < RESOLVE_DEVICE_TOUCH_MS) {
+    const { rows } = await pool.query<{ id: string; company_id: string }>(
+      `SELECT id, company_id FROM computers
+        WHERE credential_hash = $1 AND revoked_at IS NULL`,
+      [hash],
+    )
+    if (rows[0]) return { computerId: rows[0].id, companyId: rows[0].company_id }
+    // Revoked or gone: drop the memo so a re-pair with the same secret bumps.
+    deviceTouchedAt.delete(hash)
+    return null
+  }
   const { rows } = await pool.query<{ id: string; company_id: string }>(
     `UPDATE computers SET last_seen_at = NOW()
       WHERE credential_hash = $1 AND revoked_at IS NULL
       RETURNING id, company_id`,
-    [hashToken(token)],
+    [hash],
   )
   if (!rows[0]) return null
+  rememberDeviceTouch(hash, now)
   return { computerId: rows[0].id, companyId: rows[0].company_id }
 }
 

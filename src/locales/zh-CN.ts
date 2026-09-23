@@ -82,11 +82,10 @@ export const zhCN: Partial<Record<keyof typeof en, string>> = {
   'auth.sameOrigin': '同源（Vite 代理 / 静态部署）',
   'auth.clearOverride': '清除覆盖（使用构建时的默认值）',
   // ─── 「我」与设置（桌面端）────────────────────────────────────────
-  'me.headline': '你',
+  'me.headline': '我',
   'me.statPulled': '拉群',
   'me.statLed': '主导',
   'me.statNoise': '噪点',
-  'me.headlineEm': '在正中央',
   'me.subtitle': '你的智能体如何看你、记得什么，以及你给它们多大的自由度。',
   'me.tab.profile': '个人资料',
   'me.tab.usage': '用量',

@@ -22,12 +22,26 @@ function toIso(value: unknown): string {
  * tenant's connected clients see the transition.
  */
 export async function setStatus(participantId: string, status: ParticipantStatus): Promise<void> {
+  // `avail` carries no lease: `status_updated_at` only matters for the busy
+  // statuses (routing-election reads it to tell "mid-turn" from "stale"), so
+  // re-asserting avail on an already-avail row has nothing to record. Skipping
+  // it matters because every BYOA daemon posts avail at the end of every idle
+  // poll tick — at fleet scale that was ~180 row writes + Redis fan-outs per
+  // second (each fan-out re-resolving the tenant's WS recipients on every
+  // replica) to announce a status nobody changed. Busy statuses still always
+  // write: a repeat is a lease renewal.
   const { rows } = await pool.query<{ company_id: string; status_updated_at: Date }>(
-    `UPDATE participants
-        SET status = $2,
-            status_updated_at = NOW()
-      WHERE id = $1
-      RETURNING company_id, status_updated_at`,
+    status === 'avail'
+      ? `UPDATE participants
+            SET status = $2,
+                status_updated_at = NOW()
+          WHERE id = $1 AND status IS DISTINCT FROM $2
+          RETURNING company_id, status_updated_at`
+      : `UPDATE participants
+            SET status = $2,
+                status_updated_at = NOW()
+          WHERE id = $1
+          RETURNING company_id, status_updated_at`,
     [participantId, status],
   )
   for (const r of rows) {

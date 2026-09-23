@@ -139,8 +139,15 @@ export class InProcRuntimeClient implements AgentRuntimeClient {
     // Resolve membership through the normalized participant-led index, then
     // pull each conversation's unread tail with the message index. This avoids
     // both the old JSONB seq-scan and its dedicated enable_seqscan=off session.
-    const { rows } = await pool.query<InboxRow>(
-      `WITH requesting_agent AS MATERIALIZED (
+    //
+    // Named statement: this is the single hottest query in production (every
+    // BYOA agent's idle poll lands here) and the text never changes, only $1.
+    // Unnamed, Postgres re-parsed and re-planned it on every call and planning
+    // was ~60% of its measured cost; a name lets each pooled connection keep
+    // the parsed statement and plan across calls.
+    const { rows } = await pool.query<InboxRow>({
+      name: 'runtime_load_inbox',
+      text: `WITH requesting_agent AS MATERIALIZED (
          SELECT company_id
            FROM participants
           WHERE id = $1 AND kind = 'agent' AND departed_at IS NULL
@@ -223,8 +230,8 @@ export class InProcRuntimeClient implements AgentRuntimeClient {
          LEFT JOIN participants p ON p.id = m.author_id AND p.company_id = co.company_id
         ORDER BY m.created_at ASC, m.id ASC
         LIMIT 200`,
-      [agentId],
-    )
+      values: [agentId],
+    })
     await refreshAttachmentUrls(rows)
     // NOTE: This used to call recordSeen() here to advance the freshness-
     // preflight boundary, but that fired for EVERY caller of loadInbox —

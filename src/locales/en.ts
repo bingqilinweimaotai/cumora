@@ -77,11 +77,10 @@ export const en = {
   'auth.sameOrigin': 'same-origin (Vite proxy / static)',
   'auth.clearOverride': 'Clear override (use build default)',
   // ─── You / settings (desktop) ─────────────────────────────────────
-  'me.headline': 'You',
+  'me.headline': 'Me',
   'me.statPulled': 'pulled',
   'me.statLed': 'led',
   'me.statNoise': 'noise',
-  'me.headlineEm': 'at the center',
   'me.subtitle': 'How your agents see you, what they remember, and how much rope they get.',
   'me.tab.profile': 'Profile',
   'me.tab.usage': 'Usage',

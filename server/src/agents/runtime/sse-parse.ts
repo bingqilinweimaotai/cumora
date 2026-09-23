@@ -15,10 +15,18 @@
 
 export interface SseEvent { event?: string; data?: string; id?: string }
 
+export interface ParseSseOptions {
+  /** Called for every `: comment` line. The server writes one as a keepalive
+   *  every 25s (wake-bus.ts), so a consumer that wants to know whether a
+   *  silent stream is alive or half-dead can hook it here; the comment itself
+   *  is never yielded as an event. */
+  onComment?: (line: string) => void
+}
+
 /** Streaming SSE block parser. Each yielded event represents one
  *  `event: ...\ndata: ...\n\n` block. `data:` lines accumulate
  *  across continuation lines per the spec. */
-export async function* parseSseStream(body: AsyncIterable<unknown>): AsyncGenerator<SseEvent> {
+export async function* parseSseStream(body: AsyncIterable<unknown>, options: ParseSseOptions = {}): AsyncGenerator<SseEvent> {
   // TextDecoder with `stream: true` preserves partial UTF-8
   // sequences across chunk boundaries — critical when a multi-byte
   // codepoint splits across two read() calls.
@@ -35,7 +43,10 @@ export async function* parseSseStream(body: AsyncIterable<unknown>): AsyncGenera
       const out: SseEvent = {}
       for (const rawLine of block.split('\n')) {
         const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine
-        if (line.startsWith(':')) continue              // SSE comment / ping
+        if (line.startsWith(':')) {                     // SSE comment / ping
+          options.onComment?.(line)
+          continue
+        }
         const colon = line.indexOf(':')
         if (colon < 0) continue
         const field = line.slice(0, colon)

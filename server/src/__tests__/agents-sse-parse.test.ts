@@ -89,6 +89,19 @@ test('parseSseStream: `:` comment lines are skipped', async () => {
   assert.equal(out[0].event, 'wake')
 })
 
+test('parseSseStream: onComment sees every `:` line, even a ping-only block', async () => {
+  // The daemon keys its wake-stream liveness off the server's `: ping <ts>`
+  // keepalive (wake-bus.ts writes one every 25s as its own block). The hook
+  // must fire for that block even though nothing is yielded for it.
+  const comments: string[] = []
+  const out = await collect(parseSseStream(
+    asUint8Stream([': ping 1\n\n', 'event: wake\n: mid-block note\ndata: x\n\n', ': ping 2\r\n\n']),
+    { onComment: (line) => comments.push(line) },
+  ))
+  assert.deepEqual(comments, [': ping 1', ': mid-block note', ': ping 2'])
+  assert.deepEqual(out, [{ event: 'wake', data: 'x' }])
+})
+
 test('parseSseStream: unknown fields are ignored, recognized fields are kept', async () => {
   // `retry:` and `: comment` are skipped; we keep event/data/id.
   const out = await collect(parseSseStream(asUint8Stream([
