@@ -42,7 +42,7 @@ import {
   listComputers, revokeComputer, assignAgentToComputer, heartbeatComputer,
   cloudComputerId, issueRepairCode, requestEngineDetect, reportDetectedEngines,
   setComputerDefaultEngine, updateEngineDefaults, getEngineDefaults,
-  PAIRABLE_ENGINES, type EngineId,
+  rotateCompanyPairingCode, PAIRABLE_ENGINES, type EngineId,
 } from '../agents/computer/registry.js'
 import { attachComputerControlStream, deliverEngineDetect } from '../agents/computer/control-bus.js'
 import { companyTier } from '../tier.js'
@@ -1183,13 +1183,34 @@ api.get('/computers', safe(async (req, res) => {
 // No computer row is created here — pairComputer creates it once the daemon
 // pairs and reports the machine's real hostname.
 api.post('/computers', safe(async (req, res) => {
+  res.setHeader('Cache-Control', 'no-store')
   const { userId: uid, companyId } = await requireCompanyRole(req)
   res.status(201).json(await issuePairingCode({ companyId, ownerUserId: uid }))
+}))
+
+// Replace the active workspace add-computer token (owner only). Existing
+// paired device credentials and their computer-specific reconnect tokens stay
+// valid. Removing a computer only revokes that device; it does not rotate this
+// workspace token.
+api.post('/computers/pairing-code/rotate', safe(async (req, res) => {
+  res.setHeader('Cache-Control', 'no-store')
+  const { userId, companyId } = await requireCompanyRole(req, OWNER_ONLY)
+  const result = await rotateCompanyPairingCode({
+    companyId,
+    ownerUserId: userId,
+    ip: req.ip,
+    userAgent: req.get('user-agent'),
+  })
+  if ('error' in result) {
+    throw new HttpError(404, 'workspace not found')
+  }
+  res.json(result)
 }))
 
 // Issue a persistent re-pair token for an existing computer — reconnect it (and its
 // agents) by running the daemon again with this code (owner/admin).
 api.post('/computers/:id/repair', safe(async (req, res) => {
+  res.setHeader('Cache-Control', 'no-store')
   const { userId: uid, companyId } = await requireCompanyRole(req)
   const out = await issueRepairCode({ companyId, ownerUserId: uid, computerId: String(req.params.id) })
   if (!out) throw new HttpError(404, 'computer not found or not re-pairable')

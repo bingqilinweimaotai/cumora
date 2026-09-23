@@ -984,6 +984,12 @@ export const api = {
   requestPairingCode: () =>
     http<{ code: string; expiresInSeconds: number | null }>(
       '/computers', { method: 'POST', body: '{}' }),
+  /** Rotate the active workspace add-computer code. This POST is deliberately
+   *  never retried: if its response is lost, requestPairingCode() reads back
+   *  the server's current code without rotating it again. */
+  rotatePairingCode: () =>
+    http<{ code: string; expiresInSeconds: null }>(
+      '/computers/pairing-code/rotate', { method: 'POST' }),
   /** Revoke a paired computer (its device token + agent JWTs stop working). */
   deleteComputer: (id: string) =>
     http<{ ok: boolean }>(`/computers/${encodeURIComponent(id)}`, { method: 'DELETE' }),

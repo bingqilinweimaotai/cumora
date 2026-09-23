@@ -5,6 +5,7 @@ import { usePrefs } from '@/stores/preferences'
 import { useSoundStore } from '@/stores/sound'
 import { useDevtools } from '@/stores/devtools'
 import { useAuth } from '@/stores/auth'
+import { usePairingCodes } from '@/stores/pairing-codes'
 import { Avatar } from '@/components/Avatar'
 import { Checkbox } from '@/components/Checkbox'
 import { AppearancePicker, ChatLayoutPicker } from '@/components/AppearancePicker'
@@ -826,12 +827,13 @@ function asRunnableEngine(id: string): EngineId | null {
 
 function ComputersTab() {
   const t = useT()
+  const companyId = useAuth((s) => s.activeCompanyId)
+  const code = usePairingCodes((s) => s.companyId === companyId ? s.code : null)
   const byId = useComputers((s) => s.byId)
   const loaded = useComputers((s) => s.loaded)
   const participants = useParticipants((s) => s.byId)
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
-  const [code, setCode] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
   // Engine for a NEWLY added computer's starter/assigned agents. Claude is the
   // default (no flag → daemon auto-detects); every other pick is named
@@ -898,6 +900,7 @@ function ComputersTab() {
   }, [])
   useEffect(() => { if (!repairCopied) return; const id = window.setTimeout(() => setRepairCopied(false), 1600); return () => window.clearTimeout(id) }, [repairCopied])
   useEffect(() => { if (!copiedCli) return; const id = window.setTimeout(() => setCopiedCli(null), 1600); return () => window.clearTimeout(id) }, [copiedCli])
+  useEffect(() => { setCopied(false) }, [code, companyId])
 
   async function toggleRepair(id: string) {
     if (repairFor === id) { setRepairFor(null); setRepairCode(null); return }
@@ -935,10 +938,13 @@ function ComputersTab() {
   // reports the machine's real hostname — so no placeholder row, and it shows
   // up here (named after the machine) once paired, via the WS status event.
   async function addComputer() {
+    const targetCompanyId = useAuth.getState().activeCompanyId
+    if (!targetCompanyId) return
     setErr(null); setBusy(true)
     try {
+      const version = usePairingCodes.getState().beginRequest(targetCompanyId)
       const res = await api.requestPairingCode()
-      setCode(res.code)
+      usePairingCodes.getState().setCodeIfCurrent(targetCompanyId, version, res.code)
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e))
     } finally { setBusy(false) }
@@ -1361,7 +1367,7 @@ function ComputersTab() {
                   </>
                 ) : t('me.copyCommand')}
               </button>
-              <button type="button" onClick={() => setCode(null)}
+              <button type="button" onClick={() => usePairingCodes.getState().clear()}
                 className="text-[12px] font-semibold px-3 py-1.5 rounded-[9px] border border-ink-100 text-ink-600">{t('me.done')}</button>
             </div>
             <style>{`
