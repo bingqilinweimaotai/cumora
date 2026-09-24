@@ -6,6 +6,7 @@ import { useSoundStore } from '@/stores/sound'
 import { useDevtools } from '@/stores/devtools'
 import { useAuth } from '@/stores/auth'
 import { usePairingCodes } from '@/stores/pairing-codes'
+import { copyText } from '@/lib/clipboard'
 import { Avatar } from '@/components/Avatar'
 import { Checkbox } from '@/components/Checkbox'
 import { AppearancePicker, ChatLayoutPicker } from '@/components/AppearancePicker'
@@ -919,8 +920,7 @@ function ComputersTab() {
     setErr(null)
     setCopied(false)
     try {
-      if (!navigator.clipboard?.writeText) throw new Error('clipboard unavailable')
-      await navigator.clipboard.writeText(pairCommand)
+      await copyText(pairCommand)
       setCopied(true)
     } catch {
       setErr(t('me.copyFailed'))
@@ -931,8 +931,7 @@ function ComputersTab() {
     setErr(null)
     setRepairCopied(false)
     try {
-      if (!navigator.clipboard?.writeText) throw new Error('clipboard unavailable')
-      await navigator.clipboard.writeText(command)
+      await copyText(command)
       setRepairCopied(true)
     } catch {
       setErr(t('me.copyFailed'))

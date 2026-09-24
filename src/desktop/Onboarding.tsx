@@ -6,6 +6,7 @@ import { useT } from '@/lib/i18n'
 import { RUNNABLE_ENGINES, engineLabel, type RunnableEngineId } from '@/lib/engines'
 import { useAuth } from '@/stores/auth'
 import { usePairingCodes } from '@/stores/pairing-codes'
+import { copyText } from '@/lib/clipboard'
 
 /**
  * First-run gate for free-tier users: their agents run on their own machine
@@ -80,8 +81,7 @@ export function Onboarding() {
     setErr(null)
     setCopied(false)
     try {
-      if (!navigator.clipboard?.writeText) throw new Error('clipboard unavailable')
-      await navigator.clipboard.writeText(cmd)
+      await copyText(cmd)
       setCopied(true)
     } catch {
       setErr(t('onboard.copyFailed'))
