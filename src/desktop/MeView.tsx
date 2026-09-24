@@ -915,9 +915,28 @@ function ComputersTab() {
   }
   useEffect(() => { if (!copied) return; const id = window.setTimeout(() => setCopied(false), 1600); return () => window.clearTimeout(id) }, [copied])
 
-  function copyCommand() {
-    void navigator.clipboard?.writeText(pairCommand)
-    setCopied(true)
+  async function copyCommand() {
+    setErr(null)
+    setCopied(false)
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error('clipboard unavailable')
+      await navigator.clipboard.writeText(pairCommand)
+      setCopied(true)
+    } catch {
+      setErr(t('me.copyFailed'))
+    }
+  }
+
+  async function copyRepairCommand(command: string) {
+    setErr(null)
+    setRepairCopied(false)
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error('clipboard unavailable')
+      await navigator.clipboard.writeText(command)
+      setRepairCopied(true)
+    } catch {
+      setErr(t('me.copyFailed'))
+    }
   }
 
   const origin = getPairingServerOrigin()
@@ -1305,7 +1324,7 @@ function ComputersTab() {
                     ) : (
                       <>
                         <pre className="bg-ink-900 text-cloud rounded-[10px] p-3 text-[12px] overflow-x-auto whitespace-pre-wrap break-all font-mono select-all">{repairCmd}</pre>
-                        <button type="button" onClick={(e) => { e.stopPropagation(); void navigator.clipboard?.writeText(repairCmd); setRepairCopied(true) }}
+                        <button type="button" onClick={(e) => { e.stopPropagation(); void copyRepairCommand(repairCmd) }}
                           className="mt-2 inline-flex items-center justify-center min-w-[120px] text-[12px] font-semibold px-3 py-1.5 rounded-[9px] text-white transition-colors duration-200"
                           style={{ background: repairCopied ? '#3BB273' : 'var(--skype)' }}>
                           {repairCopied ? t('me.copied') : t('me.copyCommand')}
