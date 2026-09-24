@@ -357,18 +357,20 @@ function BoardPeekCard({ boardId, card, columnKind, asOf, focused }: {
         </div>
       )}
       <div className="text-[12.5px] font-medium leading-snug text-ink-800 line-clamp-3">{card.title}</div>
-      <div className="mt-2" onClick={(event) => event.stopPropagation()}>
-        <div className={cn('mb-1 text-[11px]', dueStatus === 'overdue' ? 'font-semibold text-coral-deep' : dueStatus === 'today' ? 'font-semibold text-skype-deep' : 'text-ink-500')}>
-          {dueStatus === 'overdue' ? t('boards.overdue') : dueStatus === 'today' ? t('boards.dueToday') : t('boards.dueDate')}
-          {card.dueOn ? `: ${card.dueOn}` : ''}
-        </div>
+      <div className={card.dueOn ? 'mt-2' : 'mt-1'} onClick={(event) => event.stopPropagation()}>
+        {card.dueOn && (
+          <div className={cn('mb-1 text-[11px]', dueStatus === 'overdue' ? 'font-semibold text-coral-deep' : dueStatus === 'unclassified' ? 'font-semibold text-gold-deep' : dueStatus === 'today' ? 'font-semibold text-skype-deep' : 'text-ink-500')}>
+            {dueStatus === 'overdue' ? t('boards.overdue') : dueStatus === 'unclassified' ? t('boards.pastDueUnclassified') : dueStatus === 'today' ? t('boards.dueToday') : t('boards.dueDate')}: {card.dueOn}
+          </div>
+        )}
         <DateTimePicker
           mode="date"
           value={card.dueOn ? `${card.dueOn}T00:00` : ''}
           onChange={(value) => { void saveDueOn(value) }}
-          placeholder={t('boards.noDueDate')}
+          placeholder={card.dueOn ? t('boards.noDueDate') : t('boards.addDueDate')}
           allowClear
           disabled={saving}
+          compact={!card.dueOn}
         />
         {saveError && <div role="alert" className="mt-1 text-[11px] text-coral-deep">{t('boards.dueSaveFailed')}</div>}
       </div>

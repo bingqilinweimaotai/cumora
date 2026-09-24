@@ -376,7 +376,8 @@ KANBAN  (shared boards — the same ones humans see in the Boards view):
                                                      Advances a read cursor unless --peek is passed.
 
   card ls <board_id> [--due-before YYYY-MM-DD]      list cards (date filter is exclusive)
-       [--overdue-as-of YYYY-MM-DD]                 overdue work in todo/doing columns
+       [--overdue-as-of YYYY-MM-DD]                 overdue todo/doing work + passed-date cards in unclassified columns
+                                                     (JSON due_status distinguishes them)
   card show <card_id>                               full card detail + comments
   card add <board_id> "<title>" --column <col_id>   create a card
        [--description "..."] [--assign <id>] [--due YYYY-MM-DD]
@@ -5592,13 +5593,17 @@ async function cmdCard(parsed: ParsedArgs): Promise<CliResult> {
     const { rows } = await pool.query<{
       id: string; column_id: string; title: string; assignee_id: string | null
       mentions: string[]; due_on: string | null; column_kind: string | null
+      due_status: 'overdue' | 'status_unknown' | null
     }>(
       `SELECT c.id, c.column_id, c.title, c.assignee_id, c.mentions,
-              c.due_on::text AS due_on, col.kind AS column_kind
+              c.due_on::text AS due_on, col.kind AS column_kind,
+              CASE WHEN $3::date IS NULL THEN NULL
+                   WHEN col.kind IS NULL THEN 'status_unknown'
+                   ELSE 'overdue' END AS due_status
          FROM board_cards c JOIN board_columns col ON col.id = c.column_id
         WHERE c.board_id = $1
           AND ($2::date IS NULL OR c.due_on < $2::date)
-          AND ($3::date IS NULL OR (c.due_on < $3::date AND col.kind IN ('todo', 'doing')))
+          AND ($3::date IS NULL OR (c.due_on < $3::date AND (col.kind IN ('todo', 'doing') OR col.kind IS NULL)))
         ORDER BY c.column_id, c.position ASC`,
       [boardId, dueBefore ?? null, overdueAsOf ?? null],
     )
@@ -5606,7 +5611,10 @@ async function cmdCard(parsed: ParsedArgs): Promise<CliResult> {
     if (rows.length === 0) return ok('(no cards)')
     return ok(rows.map((c) => {
       const who = c.assignee_id ? `@${c.assignee_id}` : '(unassigned)'
-      return `  ${c.id.padEnd(20)} [${c.column_id.slice(0, 16).padEnd(16)}${c.column_kind ? `:${c.column_kind}` : ''}] ${who.padEnd(16)} ${c.title}${c.due_on ? `  (due ${c.due_on})` : ''}`
+      const due = c.due_on
+        ? `  (due ${c.due_on}${c.due_status === 'status_unknown' ? '; column status unknown' : c.due_status === 'overdue' ? '; overdue' : ''})`
+        : ''
+      return `  ${c.id.padEnd(20)} [${c.column_id.slice(0, 16).padEnd(16)}${c.column_kind ? `:${c.column_kind}` : ''}] ${who.padEnd(16)} ${c.title}${due}`
     }).join('\n'))
   }
 

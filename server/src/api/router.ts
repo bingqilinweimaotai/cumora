@@ -6164,7 +6164,7 @@ api.patch('/boards/:bid/columns/:cid', async (req, res) => {
   if (typeof req.body?.position === 'number') {
     params.push(req.body.position); sets.push(`position = $${params.length}`)
   }
-  if (req.body && Object.prototype.hasOwnProperty.call(req.body, 'kind')) {
+  if (req.body && Object.hasOwn(req.body, 'kind')) {
     const kind = req.body.kind
     if (kind !== null && !['todo', 'doing', 'done'].includes(kind)) throw new HttpError(400, 'invalid column kind')
     params.push(kind); sets.push(`kind = $${params.length}`)
@@ -6289,7 +6289,7 @@ api.patch('/boards/:bid/cards/:cid', async (req, res) => {
   if (assigneeChange.changed) {
     params.push(assigneeChange.nextAssigneeId); sets.push(`assignee_id = $${params.length}`)
   }
-  if (req.body && Object.prototype.hasOwnProperty.call(req.body, 'dueOn')) {
+  if (req.body && Object.hasOwn(req.body, 'dueOn')) {
     if (req.body.dueOn !== null && !isBoardDueOn(req.body.dueOn)) {
       throw new HttpError(400, 'dueOn must be YYYY-MM-DD or null')
     }

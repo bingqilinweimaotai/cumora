@@ -31,7 +31,7 @@ async function request(companyId: string, path: string, method = 'GET', body?: u
   })
 }
 
-test('API and CLI share a date-only value; overdue query excludes done and unclassified columns', async () => {
+test('API and CLI share a date-only value; overdue query distinguishes done and unclassified columns', async () => {
   const { companyId, agentId } = await seedCompanyWithAgent()
   await seedUserMembership(USER_ID, companyId, { email: 'due-owner@test.local', displayName: 'Due Owner' })
   const boardCreated = await request(companyId, '/boards', 'POST', { title: 'Deadlines' })
@@ -89,7 +89,21 @@ test('API and CLI share a date-only value; overdue query excludes done and uncla
   assert.equal(reviewLookup.column.kind, null)
   const unknownColumn = await runCli(['--as', agentId, 'card', 'ls', boardId, '--overdue-as-of', '2026-09-24', '--json'])
   assert.equal(unknownColumn.ok, true, unknownColumn.text)
-  assert.deepEqual(JSON.parse(unknownColumn.text), [])
+  assert.deepEqual(
+    (JSON.parse(unknownColumn.text) as Array<{ id: string; column_kind: string | null; due_status: string }>).map((card) => [card.id, card.column_kind, card.due_status]),
+    [[reviewCardId, null, 'status_unknown']],
+  )
+  const unknownText = await runCli(['--as', agentId, 'card', 'ls', boardId, '--overdue-as-of', '2026-09-24'])
+  assert.match(unknownText.text, /column status unknown/)
+  assert.equal((await request(companyId, `/boards/${boardId}/columns/${reviewColumn}`, 'PATCH', { kind: 'done' })).status, 200)
+  const classifiedDone = await runCli(['--as', agentId, 'card', 'ls', boardId, '--overdue-as-of', '2026-09-24', '--json'])
+  assert.deepEqual(JSON.parse(classifiedDone.text), [])
+  assert.equal((await request(companyId, `/boards/${boardId}/columns/${reviewColumn}`, 'PATCH', { kind: 'doing' })).status, 200)
+  const classifiedDoing = await runCli(['--as', agentId, 'card', 'ls', boardId, '--overdue-as-of', '2026-09-24', '--json'])
+  assert.deepEqual(
+    (JSON.parse(classifiedDoing.text) as Array<{ id: string; due_status: string }>).map((card) => [card.id, card.due_status]),
+    [[reviewCardId, 'overdue']],
+  )
 
   const apiClear = await request(companyId, `/boards/${boardId}/cards/${cardId}`, 'PATCH', { dueOn: null })
   assert.equal(apiClear.status, 200)

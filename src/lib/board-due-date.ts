@@ -1,4 +1,4 @@
-export type BoardDueStatus = 'none' | 'date' | 'today' | 'overdue'
+export type BoardDueStatus = 'none' | 'date' | 'today' | 'overdue' | 'unclassified'
 
 /** The caller supplies a calendar day, so this never depends on server time. */
 export function boardDueStatus(
@@ -7,8 +7,9 @@ export function boardDueStatus(
   asOf: string,
 ): BoardDueStatus {
   if (!dueOn) return 'none'
-  if (columnKind !== 'todo' && columnKind !== 'doing') return 'date'
-  if (dueOn < asOf) return 'overdue'
+  if (columnKind === 'done') return 'date'
+  if (dueOn < asOf) return columnKind === null ? 'unclassified' : 'overdue'
+  if (columnKind === null) return 'date'
   if (dueOn === asOf) return 'today'
   return 'date'
 }

@@ -477,8 +477,8 @@ function CardTile({ card, columnKind, asOf, onOpen }: {
         <MentionedText text={card.title} byId={byId} />
       </div>
       {card.dueOn && (
-        <div className={cn('mt-1.5 text-[11px]', dueStatus === 'overdue' ? 'font-semibold text-coral-deep' : dueStatus === 'today' ? 'font-semibold text-skype-deep' : 'text-ink-500')}>
-          {dueStatus === 'overdue' ? t('boards.overdue') : dueStatus === 'today' ? t('boards.dueToday') : t('boards.dueDate')}: {card.dueOn}
+        <div className={cn('mt-1.5 text-[11px]', dueStatus === 'overdue' ? 'font-semibold text-coral-deep' : dueStatus === 'unclassified' ? 'font-semibold text-gold-deep' : dueStatus === 'today' ? 'font-semibold text-skype-deep' : 'text-ink-500')}>
+          {dueStatus === 'overdue' ? t('boards.overdue') : dueStatus === 'unclassified' ? t('boards.pastDueUnclassified') : dueStatus === 'today' ? t('boards.dueToday') : t('boards.dueDate')}: {card.dueOn}
         </div>
       )}
       {(card.assigneeId || card.mentions.length > 0 || card.commentCount > 0) && (
