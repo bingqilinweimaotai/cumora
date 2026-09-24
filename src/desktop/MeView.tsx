@@ -830,6 +830,9 @@ function ComputersTab() {
   const t = useT()
   const companyId = useAuth((s) => s.activeCompanyId)
   const code = usePairingCodes((s) => s.companyId === companyId ? s.code : null)
+  // Onboarding and workspace settings share this code; only this tab's Add
+  // action should reveal a command here.
+  const [showPairCommand, setShowPairCommand] = useState(false)
   const byId = useComputers((s) => s.byId)
   const loaded = useComputers((s) => s.loaded)
   const participants = useParticipants((s) => s.byId)
@@ -902,6 +905,7 @@ function ComputersTab() {
   useEffect(() => { if (!repairCopied) return; const id = window.setTimeout(() => setRepairCopied(false), 1600); return () => window.clearTimeout(id) }, [repairCopied])
   useEffect(() => { if (!copiedCli) return; const id = window.setTimeout(() => setCopiedCli(null), 1600); return () => window.clearTimeout(id) }, [copiedCli])
   useEffect(() => { setCopied(false) }, [code, companyId])
+  useEffect(() => { setShowPairCommand(false) }, [companyId])
 
   async function toggleRepair(id: string) {
     if (repairFor === id) { setRepairFor(null); setRepairCode(null); return }
@@ -951,18 +955,24 @@ function ComputersTab() {
       (p.computerId === computerId || (isCloud && !p.computerId))).length
   }
 
-  // Clicking "Add a computer" just mints a pairing token and shows the command.
+  // Clicking "Add a computer" reads the current pairing token and shows the command.
   // The computer itself is created server-side only when the daemon pairs and
   // reports the machine's real hostname — so no placeholder row, and it shows
   // up here (named after the machine) once paired, via the WS status event.
   async function addComputer() {
     const targetCompanyId = useAuth.getState().activeCompanyId
     if (!targetCompanyId) return
-    setErr(null); setBusy(true)
+    setErr(null); setBusy(true); setCopied(false); setShowPairCommand(false)
     try {
-      const version = usePairingCodes.getState().beginRequest(targetCompanyId)
+      // Another screen may have left a code in the shared store. Always read
+      // the active code before revealing this tab's command.
+      const version = usePairingCodes.getState().beginRequest(targetCompanyId, true)
       const res = await api.requestPairingCode()
       usePairingCodes.getState().setCodeIfCurrent(targetCompanyId, version, res.code)
+      const state = usePairingCodes.getState()
+      if (state.companyId === targetCompanyId && state.requestVersion === version) {
+        setShowPairCommand(true)
+      }
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e))
     } finally { setBusy(false) }
@@ -1337,7 +1347,7 @@ function ComputersTab() {
           })}
         </div>
 
-        {code ? (
+        {showPairCommand && code ? (
           <div className="mt-4 bg-sky2-50 rounded-[14px] p-4" style={{ border: '1px solid var(--sky-100)' }}>
             <div className="text-[13px] font-semibold text-ink-900 mb-1">
               {t('me.runOnHost')}
@@ -1385,7 +1395,7 @@ function ComputersTab() {
                   </>
                 ) : t('me.copyCommand')}
               </button>
-              <button type="button" onClick={() => usePairingCodes.getState().clear()}
+              <button type="button" onClick={() => { setShowPairCommand(false); usePairingCodes.getState().clear() }}
                 className="text-[12px] font-semibold px-3 py-1.5 rounded-[9px] border border-ink-100 text-ink-600">{t('me.done')}</button>
             </div>
             <style>{`
