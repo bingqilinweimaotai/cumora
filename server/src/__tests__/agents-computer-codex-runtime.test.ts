@@ -455,6 +455,8 @@ test('a legacy backup rename failure preserves both pointers and does not block 
   const legacy = await pointer()
   await rollout(originalName, { id })
   await mkdir(`${legacy}.migrated`)
+  // A nonempty directory blocks rename on both POSIX and Windows.
+  await writeFile(join(`${legacy}.migrated`, 'keep'), 'existing backup')
   await assert.rejects(migrateCodexSession('atlas'), /old session pointer has been preserved/)
   assert.equal(await readFile(legacy, 'utf8'), id)
   assert.equal(await migrateCodexSession('atlas'), false)
@@ -463,6 +465,7 @@ test('a legacy backup rename failure preserves both pointers and does not block 
   assert.equal(await migrateCodexSession('atlas'), false)
   assert.deepEqual(await readdir(legacy), [])
   assert.equal(await readFile(join(pointers, 'atlas', 'codex.runtime.session'), 'utf8'), id + '\n')
+  assert.equal(await readFile(join(`${legacy}.migrated`, 'keep'), 'utf8'), 'existing backup')
 })
 
 test('SQLite selection wins over filename timestamps, including uncheckpointed WAL rows', { skip: !sqlite }, async () => {
