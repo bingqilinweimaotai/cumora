@@ -6,6 +6,10 @@ import { join } from 'node:path'
 export const CODEX_SESSION_SCOPE = 'runtime'
 export const CODEX_LOGIN_COMMAND = 'cumora agent computer --codex-login'
 export const CODEX_MIGRATE_COMMAND = 'cumora agent computer --migrate-codex-sessions'
+export const CODEX_RUNTIME_CONFIG_ARGS = [
+  '-c', 'memories.generate_memories=false',
+  '-c', 'memories.use_memories=false',
+]
 
 export function codexRuntimeHome(): string {
   return join(homedir(), '.cumora', 'codex-runtime')

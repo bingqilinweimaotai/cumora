@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process'
 import type { EngineId } from './engine.js'
 import { isCustomAnthropicEndpoint, readClaudeUserSettings, withClaudeUserSettingsEnv } from './claude-user-settings.js'
 import { versionCommandInvocation } from './cli-version.js'
-import { codexRuntimeEnv } from './codex-runtime.js'
+import { CODEX_RUNTIME_CONFIG_ARGS, codexRuntimeEnv } from './codex-runtime.js'
 
 export type ModelCatalogSource = 'protocol' | 'cli' | 'presets'
 export type FastModelScope = 'agent' | 'computer' | 'unsupported'
@@ -323,7 +323,7 @@ interface CodexListItem {
 
 function discoverCodex(command: string, env: NodeJS.ProcessEnv): Promise<{ models: EngineModelOption[]; defaultModel: string | null } | null> {
   return new Promise((resolve) => {
-    const invocation = versionCommandInvocation(command, ['app-server', '--listen', 'stdio://'])
+    const invocation = versionCommandInvocation(command, [...CODEX_RUNTIME_CONFIG_ARGS, 'app-server', '--listen', 'stdio://'])
     let child: ReturnType<typeof spawn>
     try {
       child = spawn(invocation.command, invocation.args, {

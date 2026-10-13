@@ -3570,8 +3570,7 @@ async function doRun(serverOverride?: string): Promise<void> {
               failure.token = token
               failure.tokenExpiresAt = Date.now() + expiresInSeconds * 1000
             }
-            const token = failure.token
-            const reported = failure.reported
+            const { token, reported } = failure
             const conversationIds = await failureConversationIds(cfg.serverUrl, token, null)
             await Promise.all(conversationIds.filter(id => !reported.has(id)).map(async conversationId => {
               const result = await runtimeBest(cfg.serverUrl, '/notices', token, {

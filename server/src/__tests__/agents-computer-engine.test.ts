@@ -14,11 +14,7 @@ import { type ProviderProfile, providerProfileEnv } from '../agents/computer/pro
 import { CLAUDE_CORE_ENV_KEYS, CLAUDE_TURN_ENV_KEYS } from '../agents/computer/claude-user-settings.js'
 
 const IS_WIN = process.platform === 'win32'
-const ORIGINAL_PATH = process.env.PATH
-const ORIGINAL_PATHEXT = process.env.PATHEXT
-const ORIGINAL_UNSANDBOXED = process.env.CUMORA_BYOA_ALLOW_UNSANDBOXED
-const ORIGINAL_HOME = process.env.HOME
-const ORIGINAL_USERPROFILE = process.env.USERPROFILE
+const original = { ...process.env }
 const tempDirs: string[] = []
 // Sessions spawn a child process. Track them so a FAILING assertion still tears
 // the child down — otherwise it outlives the test and the runner never exits.
@@ -78,16 +74,8 @@ beforeEach(async () => {
 
 afterEach(async () => {
   for (const s of liveSessions.splice(0)) { try { await s.stop() } catch { /* already gone */ } }
-  if (ORIGINAL_PATH === undefined) delete process.env.PATH
-  else process.env.PATH = ORIGINAL_PATH
-  if (ORIGINAL_PATHEXT === undefined) delete process.env.PATHEXT
-  else process.env.PATHEXT = ORIGINAL_PATHEXT
-  if (ORIGINAL_UNSANDBOXED === undefined) delete process.env.CUMORA_BYOA_ALLOW_UNSANDBOXED
-  else process.env.CUMORA_BYOA_ALLOW_UNSANDBOXED = ORIGINAL_UNSANDBOXED
-  if (ORIGINAL_HOME === undefined) delete process.env.HOME
-  else process.env.HOME = ORIGINAL_HOME
-  if (ORIGINAL_USERPROFILE === undefined) delete process.env.USERPROFILE
-  else process.env.USERPROFILE = ORIGINAL_USERPROFILE
+  for (const key of Object.keys(process.env)) if (!(key in original)) delete process.env[key]
+  Object.assign(process.env, original)
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })))
 })
 
@@ -564,7 +552,7 @@ test('resolveSpawn runs a native Windows executable without cmd.exe', { skip: !I
   const binDir = join(root, 'bin')
   await mkdir(binDir)
   await writeFile(join(binDir, 'codex.exe'), '', 'utf8')
-  process.env.PATH = `${binDir};${ORIGINAL_PATH ?? ''}`
+  process.env.PATH = `${binDir};${original.PATH ?? original.Path ?? ''}`
   process.env.PATHEXT = '.EXE;.CMD;.BAT;.COM'
 
   const r = resolveSpawn('codex')
@@ -600,7 +588,7 @@ test('Codex one-shot paths send prompts through stdin', async () => {
     await writeFile(launcher, '#!/bin/sh\nexec node "$(dirname "$0")/capture.js" "$@"\n', 'utf8')
     await chmod(launcher, 0o755)
   }
-  process.env.PATH = `${binDir}${delimiter}${ORIGINAL_PATH ?? ''}`
+  process.env.PATH = `${binDir}${delimiter}${original.PATH ?? original.Path ?? ''}`
 
   const adapter = getAdapter('codex')
   const mcpShim = join(root, 'trusted', 'cumora-mcp')

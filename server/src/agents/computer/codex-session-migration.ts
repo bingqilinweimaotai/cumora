@@ -1,19 +1,22 @@
-import { createReadStream, existsSync } from 'node:fs'
-import { copyFile, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { randomUUID } from 'node:crypto'
+import { createReadStream, createWriteStream } from 'node:fs'
+import { link, mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, dirname, join, relative, resolve, sep } from 'node:path'
 import { createInterface } from 'node:readline'
 import { Readable } from 'node:stream'
+import { pipeline } from 'node:stream/promises'
 import { decompress } from 'fzstd'
 import { CODEX_SESSION_SCOPE, codexRuntimeHome } from './codex-runtime.js'
 import { EngineSessionStore } from './session-store.js'
 
+function missingAsNull(err: NodeJS.ErrnoException): null {
+  if (err.code !== 'ENOENT') throw err
+  return null
+}
+
 async function entries(path: string, recursive = true): Promise<string[]> {
-  try { return await readdir(path, { recursive }) }
-  catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return []
-    throw err
-  }
+  return await readdir(path, { recursive }).catch(missingAsNull) ?? []
 }
 
 interface Rollout {
@@ -21,6 +24,7 @@ interface Rollout {
   timestamp: string
   threadId: string
   rolloutId: string
+  endByteOffset?: number
 }
 
 interface SessionMetadata {
@@ -53,6 +57,18 @@ async function rolloutMetadata(path: string, minimumBytes = 0): Promise<SessionM
   const bytes = path.endsWith('.zst') ? decompress(await readFile(path)) : null
   if (minimumBytes > 0 && minimumBytes > (bytes?.byteLength ?? (await stat(path)).size)) {
     throw new Error(`history_base extends beyond source rollout ${path}`)
+  }
+  if (minimumBytes > 0) {
+    let lastByte = bytes?.[minimumBytes - 1]
+    if (!bytes) {
+      const file = await open(path, 'r')
+      try {
+        const buffer = Buffer.alloc(1)
+        await file.read(buffer, 0, 1, minimumBytes - 1)
+        lastByte = buffer[0]
+      } finally { await file.close() }
+    }
+    if (lastByte !== 10) throw new Error(`history_base does not end at a complete record in ${path}`)
   }
   const input = bytes ? Readable.from([bytes]) : createReadStream(path, { encoding: 'utf8' })
   const lines = createInterface({ input, crlfDelay: Infinity })
@@ -112,11 +128,10 @@ async function selectedRollout(id: string, home: string, rollouts: Rollout[]): P
 async function rolloutHistory(current: Rollout, home: string, rollouts: Rollout[]): Promise<Rollout[]> {
   const history: Rollout[] = []
   const seen = new Set<string>()
-  let minimumBytes = 0
   for (;;) {
     if (seen.has(current.rolloutId)) throw new Error(`cyclic history_base at ${current.path}`)
     seen.add(current.rolloutId)
-    const metadata = await rolloutMetadata(join(home, current.path), minimumBytes)
+    const metadata = await rolloutMetadata(join(home, current.path), current.endByteOffset)
     if (metadata.id !== current.threadId) throw new Error(`rollout belongs to another thread: ${current.path}`)
     history.push(current)
     const base = metadata.history_base
@@ -130,8 +145,34 @@ async function rolloutHistory(current: Rollout, home: string, rollouts: Rollout[
     if (sources.length !== 1) {
       throw new Error(`${sources.length ? 'ambiguous' : 'missing'} source rollout ${base.thread_id} referenced by ${current.path}`)
     }
-    minimumBytes = base.end_byte_offset
-    current = sources[0]
+    current = { ...sources[0], endByteOffset: base.end_byte_offset }
+  }
+}
+
+/** Publish complete files without truncating a rollout another agent already uses. */
+async function copyRollout(rollout: Rollout, sourceHome: string, destinationHome: string): Promise<void> {
+  const source = join(sourceHome, rollout.path)
+  const destination = join(destinationHome, rollout.endByteOffset ? rollout.path.replace(/\.zst$/, '') : rollout.path)
+  await mkdir(dirname(destination), { recursive: true, mode: 0o700 })
+  const temporary = `${destination}.${randomUUID()}.tmp${destination.endsWith('.zst') ? '.zst' : ''}`
+  try {
+    const input = source.endsWith('.zst') && rollout.endByteOffset
+      ? Readable.from([decompress(await readFile(source)).subarray(0, rollout.endByteOffset)])
+      : createReadStream(source, { end: rollout.endByteOffset ? rollout.endByteOffset - 1 : undefined })
+    await pipeline(input, createWriteStream(temporary, { flags: 'wx', mode: 0o600 }))
+    const metadata = await rolloutMetadata(temporary, rollout.endByteOffset)
+    if (metadata.id !== rollout.threadId) throw new Error(`copied rollout belongs to another thread: ${source}`)
+    try { await link(temporary, destination) }
+    catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err
+      const requiredBytes = rollout.endByteOffset ?? (temporary.endsWith('.zst')
+        ? decompress(await readFile(temporary)).byteLength
+        : (await stat(temporary)).size)
+      const existing = await rolloutMetadata(destination, requiredBytes)
+      if (existing.id !== rollout.threadId) throw new Error(`destination rollout belongs to another thread: ${destination}`)
+    }
+  } finally {
+    await rm(temporary, { force: true }).catch(() => {})
   }
 }
 
@@ -144,31 +185,38 @@ export async function migrateCodexSession(
   destinationHome = codexRuntimeHome(),
 ): Promise<boolean> {
   const legacy = join(sessionsDir, agentId, 'codex.session')
-  if (!existsSync(legacy)) return false
   const store = new EngineSessionStore(sessionsDir, agentId, 'codex', CODEX_SESSION_SCOPE)
-  // A newer runtime pointer wins; stale-pointer cleanup must not prevent resume.
-  if (await store.load()) {
-    await rm(legacy, { force: true }).catch(() => {})
-    return false
-  }
-  const id = (await readFile(legacy, 'utf8')).trim()
+  let id = ''
   try {
+    if (!await stat(legacy).catch(missingAsNull)) return false
+    // A read error is not an absent pointer: never overwrite unreadable state.
+    const runtime = await readFile(store.sessionFile, 'utf8').catch(missingAsNull)
+    if (runtime?.trim()) {
+      await rename(legacy, `${legacy}.migrated`).catch(async () => {
+        await rm(legacy, { force: true }).catch(() => {})
+      })
+      return false
+    }
+    id = (await readFile(legacy, 'utf8')).trim()
     if (id) {
       if (resolve(sourceHome) === resolve(destinationHome)) throw new Error('source and destination Codex homes are the same')
       const rollouts = await rolloutsIn(sourceHome)
       const current = await selectedRollout(id, sourceHome, rollouts)
       const history = await rolloutHistory(current, sourceHome, rollouts)
-      for (const rollout of history) {
-        const destination = join(destinationHome, rollout.path)
-        await mkdir(dirname(destination), { recursive: true, mode: 0o700 })
-        await copyFile(join(sourceHome, rollout.path), destination)
-      }
+      for (const rollout of history) await copyRollout(rollout, sourceHome, destinationHome)
       // Migration must report pointer-write failures instead of starting fresh.
-      const temporary = `${store.sessionFile}.migrating`
-      await writeFile(temporary, `${id}\n`, { mode: 0o600 })
-      await rename(temporary, store.sessionFile)
+      const temporary = `${store.sessionFile}.${randomUUID()}.migrating`
+      try {
+        await writeFile(temporary, `${id}\n`, { mode: 0o600, flag: 'wx' })
+        try { await link(temporary, store.sessionFile) }
+        catch (err) {
+          if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err
+          if (!(await readFile(store.sessionFile, 'utf8')).trim()) throw err
+          return false
+        }
+      } finally { await rm(temporary, { force: true }).catch(() => {}) }
     }
-    await rename(legacy, `${legacy}.migrated`)
+    await rename(legacy, `${legacy}.migrated`).catch(missingAsNull)
     return !!id
   } catch (err) {
     throw new Error(`Cannot migrate Codex ${id ? `thread ${id}` : 'session'} for ${agentId}: ${err instanceof Error ? err.message : String(err)}. The old session pointer has been preserved.`, { cause: err })
