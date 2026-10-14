@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { type BigIntStats, linkSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { isAbsolute, join, resolve } from 'node:path'
+import { isAbsolute, join, relative, resolve } from 'node:path'
 
 // Keep pointers to the isolated runtime separate from pre-upgrade threads.
 export const CODEX_SESSION_SCOPE = 'runtime'
@@ -49,13 +49,13 @@ function syncSharedAuth(home: string, sourceHome?: string): void {
     if (shared) rmSync(marker, { force: true })
     return
   }
-  const source = sourceHome && resolve(sourceHome) !== resolve(home)
+  const source = sourceHome && relative(sourceHome, home) !== ''
     ? join(resolve(sourceHome), 'auth.json') : shared?.source
   if (!source) return
   const original = statSync(source, { bigint: true, throwIfNoEntry: false })
   if (original && !original.isFile()) throw new Error(`Codex authentication source is not a file: ${source}`)
-  if (current && shared?.source === source
-    && original && fileId(current) === fileId(original)) return
+  if (current && original && fileId(current) === fileId(original)
+    && (shared?.source === source || relative(realpathSync(source), realpathSync(target)) === '')) return
   if (current) rmSync(target)
   let linkedId = shared?.fileId
   if (original) {

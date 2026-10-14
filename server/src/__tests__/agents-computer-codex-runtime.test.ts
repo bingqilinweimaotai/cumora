@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
 import { writeFileSync } from 'node:fs'
-import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises'
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { delimiter, dirname, join } from 'node:path'
 import { afterEach, beforeEach, test } from 'node:test'
@@ -138,6 +138,11 @@ test('authentication stays shared in both directions without sharing personal co
   await writeFile(join(source, 'history.jsonl'), 'personal history')
   codexRuntimeEnv()
   const runtime = join(destination, 'auth.json')
+  codexRuntimeEnv({ ...process.env, CODEX_HOME: IS_WIN ? destination.toUpperCase() : destination })
+  const alias = join(root, 'runtime-alias')
+  await symlink(destination, alias, IS_WIN ? 'junction' : 'dir')
+  codexRuntimeEnv({ ...process.env, CODEX_HOME: alias })
+  assert.equal(JSON.parse(await readFile(join(destination, 'auth.shared.json'), 'utf8')).source, personal)
   assert.equal((await lstat(runtime)).ino, (await lstat(personal)).ino)
   assert.equal(await readFile(runtime, 'utf8'), await readFile(personal, 'utf8'))
   const before = codexAuthFingerprint()
