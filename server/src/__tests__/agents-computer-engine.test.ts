@@ -70,6 +70,7 @@ beforeEach(async () => {
   tempDirs.push(home)
   process.env.HOME = home
   process.env.USERPROFILE = home
+  process.env.CODEX_HOME = join(home, 'personal-codex')
 })
 
 afterEach(async () => {

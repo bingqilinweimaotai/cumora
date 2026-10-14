@@ -33,7 +33,7 @@ import { stripLoneSurrogates } from '../text-safety.js'
 import { isCustomAnthropicEndpoint, readClaudeUserSettings, withClaudeUserSettingsEnv } from './claude-user-settings.js'
 import { isCliVersionAtLeast, probeEngineVersion, probeLocalEngineVersionWithRetry, versionCommandInvocation } from './cli-version.js'
 import { discoverEngineModelCatalog, type EngineModelCatalog } from './model-catalog.js'
-import { CODEX_RUNTIME_CONFIG_ARGS, codexRuntimeEnv } from './codex-runtime.js'
+import { CODEX_RUNTIME_CONFIG_ARGS, codexAuthFingerprint, codexRuntimeEnv } from './codex-runtime.js'
 
 const IS_WIN = process.platform === 'win32'
 
@@ -2000,6 +2000,8 @@ function codexSecureExecArgs(args: { home: string; env: NodeJS.ProcessEnv }, rea
  *  serially; each resolves on that turn's `turn/completed`. */
 class CodexSession implements EngineSession {
   private readonly child: ChildProcess
+  private readonly authHome: string
+  private readonly authFingerprint: string | null | undefined
   private readonly onLog: (line: string) => void
   private readonly onHopUsage?: (r: EngineHopReport) => void
   /** Wall-clock when the CURRENT turn started (turn/start request sent), used to
@@ -2031,6 +2033,8 @@ class CodexSession implements EngineSession {
   private turnStart = { input: 0, cached: 0, output: 0 }
 
   constructor(bin: string, spawnArgs: string[], home: string, env: NodeJS.ProcessEnv, opts: EngineSessionArgs) {
+    this.authHome = env.CODEX_HOME!
+    this.authFingerprint = codexAuthFingerprint(this.authHome)
     this.onLog = opts.onLog
     this.onHopUsage = opts.onHopUsage
     this.threadId = opts.resumeSessionId ?? null
@@ -2059,7 +2063,18 @@ class CodexSession implements EngineSession {
     queueMicrotask(() => { this.initializeId = this.req('initialize', { clientInfo: { name: 'cumora-daemon', version: '1.0.0' }, capabilities: { experimentalApi: true } }) })
   }
 
-  get alive(): boolean { return !this.exited && this.child.stdin?.writable === true }
+  get alive(): boolean {
+    if (this.exited || this.child.stdin?.writable !== true) return false
+    if (!this.pending) {
+      const auth = codexAuthFingerprint(this.authHome)
+      if (auth !== undefined && auth !== this.authFingerprint) {
+        this.onLog('[codex] login changed; restarting the session with its saved thread')
+        void this.stop({ force: true })
+        return false
+      }
+    }
+    return true
+  }
   get sessionId(): string | null { return this.threadId }
 
   send(prompt: string): Promise<EngineRunResult> {

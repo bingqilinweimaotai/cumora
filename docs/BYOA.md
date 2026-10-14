@@ -39,27 +39,43 @@ model-generated commands.
 
 All Cumora Codex calls use `CODEX_HOME` and `CODEX_SQLITE_HOME` at
 `~/.cumora/codex-runtime/`, including triage, doctor, model discovery and
-unsandboxed compatibility mode. Personal config, credentials, memories and
-unrelated sessions stay separate. Model calls set `memories.generate_memories=false`
+unsandboxed compatibility mode. Personal config, memories and unrelated sessions
+stay separate. Model calls set `memories.generate_memories=false`
 and `memories.use_memories=false` to disable Codex's native memory; agents keep
-using Cumora's memory files. Sign in once for this runtime:
+using Cumora's memory files.
+
+When the runtime has no independent login, Cumora reuses the personal
+`CODEX_HOME/auth.json` (default `~/.codex/auth.json`) through a hard link.
+Both clients refresh the same credential file. Before each new process or idle
+agent turn, Cumora follows replacement, account changes and logout in the
+personal home. A changed login restarts an idle app-server with its saved thread
+ID; an active turn finishes first. Existing independent runtime credentials
+are preserved.
+
+Sharing requires file-backed credentials on the same filesystem. If the personal
+login exists only in the OS keyring, or the filesystem cannot create hard links,
+sign in separately for Cumora:
 
 ```sh
 cumora agent computer --codex-login
 ```
 
 The command runs `codex login` on Windows, macOS and Linux; authentication
-errors and `--doctor` also point to it. You can use your personal account,
-which still shares its account quota. The persistent app-server and model
-discovery read the runtime's `config.toml`; add any needed `model` or
+errors and `--doctor` also point to it. While authentication is linked, logging
+in updates the shared personal credentials too. Use personal Codex to log out
+of the shared account. Account quota is shared. Codex still owns token refresh
+and recovery; a revoked or unrefreshable login requires signing in again.
+The persistent app-server and model discovery read the runtime's `config.toml`;
+add any needed `model` or
 `model_providers` settings there. Secure `exec` ignores user config.
 
 Main threads resume after daemon restarts: macOS/Linux use app-server, while
 Windows and app-server fallbacks use `exec --json` / `exec resume <thread-id>`.
 Triage and doctor use ephemeral sessions.
 
-**Upgrading existing agents:** sign in above. Before starting each Codex
-runner, the daemon automatically migrates the thread referenced by
+**Upgrading existing agents:** file-backed personal logins are reused automatically;
+use the command above only when separate authentication is needed. Before starting
+each Codex runner, the daemon automatically migrates the thread referenced by
 `~/.cumora/sessions/<agent-id>/codex.session` from the old `CODEX_HOME`
 (default `~/.codex`), preserving its ID.
 

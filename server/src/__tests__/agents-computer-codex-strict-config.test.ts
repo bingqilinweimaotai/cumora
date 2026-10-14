@@ -49,6 +49,7 @@ async function fixture(homeName: string): Promise<Fixture> {
   tempDirs.push(root)
   process.env.HOME = root
   process.env.USERPROFILE = root
+  process.env.CODEX_HOME = join(root, 'personal-codex')
   const binDir = join(root, 'bin')
   // The reporter asked specifically for a home with ordinary separators and
   // spaces: that is where the quoting in the override has to hold up.

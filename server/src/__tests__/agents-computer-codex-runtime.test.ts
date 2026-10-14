@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
-import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { writeFileSync } from 'node:fs'
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { delimiter, dirname, join } from 'node:path'
 import { afterEach, beforeEach, test } from 'node:test'
 import { promisify } from 'node:util'
 import { fileURLToPath } from 'node:url'
-import { codexRuntimeEnv, codexRuntimeHome, CODEX_SESSION_SCOPE } from '../agents/computer/codex-runtime.js'
+import { codexAuthFingerprint, codexRuntimeEnv, codexRuntimeHome, CODEX_SESSION_SCOPE } from '../agents/computer/codex-runtime.js'
 import { migrateCodexSession, migrateCodexSessions } from '../agents/computer/codex-session-migration.js'
 import { getAdapter } from '../agents/computer/engine.js'
 import { clearModelCatalogCache, discoverEngineModelCatalog } from '../agents/computer/model-catalog.js'
@@ -33,7 +34,9 @@ const sqlite = await import(sqliteModule).catch(() => null)
 const fakeCodex = `
 const fs = require('node:fs')
 const record = value => fs.appendFileSync(process.env.CODEX_TEST_CAPTURE, JSON.stringify(value) + '\\n')
-record({ argv: process.argv.slice(2), home: process.env.CODEX_HOME, sqlite: process.env.CODEX_SQLITE_HOME })
+let authAccount
+try { authAccount = JSON.parse(fs.readFileSync(require('node:path').join(process.env.CODEX_HOME, 'auth.json'), 'utf8')).tokens?.account_id } catch {}
+record({ argv: process.argv.slice(2), home: process.env.CODEX_HOME, sqlite: process.env.CODEX_SQLITE_HOME, authAccount })
 const send = value => process.stdout.write(JSON.stringify(value) + '\\n')
 if (process.argv.includes('--version')) {
   const versionCalls = fs.readFileSync(process.env.CODEX_TEST_CAPTURE, 'utf8').trim().split('\\n')
@@ -112,6 +115,13 @@ function runComputer(flag: string, env = process.env) {
     'agent', 'computer', flag], { env, windowsHide: true, timeout: 15_000 })
 }
 
+async function writeAuth(home: string, account: string): Promise<string> {
+  await mkdir(home, { recursive: true })
+  const path = join(home, 'auth.json')
+  await writeFile(path, JSON.stringify({ tokens: { account_id: account, access_token: `fixture-${account}` } }), { mode: 0o600 })
+  return path
+}
+
 test('Codex environment overrides personal storage without mutating the parent or copying personal data', async () => {
   const env = { ...process.env }
   const child = codexRuntimeEnv(env)
@@ -122,7 +132,83 @@ test('Codex environment overrides personal storage without mutating the parent o
   assert.deepEqual(await readdir(child.CODEX_HOME!), [])
 })
 
+test('authentication stays shared in both directions without sharing personal config or history', async () => {
+  const personal = await writeAuth(source, 'original-account')
+  await writeFile(join(source, 'config.toml'), 'personal settings')
+  await writeFile(join(source, 'history.jsonl'), 'personal history')
+  codexRuntimeEnv()
+  const runtime = join(destination, 'auth.json')
+  assert.equal((await lstat(runtime)).ino, (await lstat(personal)).ino)
+  assert.equal(await readFile(runtime, 'utf8'), await readFile(personal, 'utf8'))
+  const before = codexAuthFingerprint()
+  await writeAuth(destination, 'runtime-refreshed-token')
+  assert.equal(await readFile(personal, 'utf8'), await readFile(runtime, 'utf8'))
+  await writeAuth(source, 'personal-refreshed-token')
+  assert.equal(await readFile(runtime, 'utf8'), await readFile(personal, 'utf8'))
+  assert.notEqual(codexAuthFingerprint(), before)
+  assert.deepEqual(await readdir(destination), ['auth.json', 'auth.shared.json'])
+  assert.equal(await readFile(join(source, 'config.toml'), 'utf8'), 'personal settings')
+  assert.equal(await readFile(join(source, 'history.jsonl'), 'utf8'), 'personal history')
+})
+
+test('hard-linked authentication follows atomic replacement, logout and login after restart', async () => {
+  const personal = await writeAuth(source, 'original-account')
+  codexRuntimeEnv()
+  const runtime = join(destination, 'auth.json')
+  const replacement = await writeAuth(join(root, 'replacement'), 'new-account')
+  await rename(replacement, personal)
+  codexRuntimeEnv()
+  assert.equal(await readFile(runtime, 'utf8'), await readFile(personal, 'utf8'))
+  await rm(personal)
+  assert.equal(codexAuthFingerprint(), null)
+  await assert.rejects(readFile(runtime), { code: 'ENOENT' })
+  await writeAuth(source, 'signed-in-again')
+  // A new process must reconstruct the binding from disk, not an in-memory cache.
+  await runComputer('--codex-login')
+  assert.equal(await readFile(runtime, 'utf8'), await readFile(personal, 'utf8'))
+  assert.equal((await calls()).find(call => call.argv?.includes('login'))!.authAccount, 'signed-in-again')
+})
+
+test('an independent runtime login is preserved, including replacement of a previously shared file', async () => {
+  const personal = await writeAuth(source, 'personal-account')
+  const runtime = await writeAuth(destination, 'independent-account')
+  const independent = await readFile(runtime, 'utf8')
+  codexRuntimeEnv()
+  assert.equal(await readFile(runtime, 'utf8'), independent)
+  await assert.rejects(readFile(join(destination, 'auth.shared.json')), { code: 'ENOENT' })
+  await rm(runtime)
+  codexRuntimeEnv()
+  const replacement = await writeAuth(join(root, 'independent'), 'replacement-account')
+  await rename(replacement, runtime)
+  codexRuntimeEnv()
+  assert.equal(JSON.parse(await readFile(runtime, 'utf8')).tokens.account_id, 'replacement-account')
+  assert.equal(JSON.parse(await readFile(personal, 'utf8')).tokens.account_id, 'personal-account')
+  await assert.rejects(readFile(join(destination, 'auth.shared.json')), { code: 'ENOENT' })
+})
+
+test('unreadable shared-auth metadata fails closed without replacing either login', async () => {
+  const personal = await writeAuth(source, 'personal-account')
+  await mkdir(destination, { recursive: true })
+  await writeFile(join(destination, 'auth.shared.json'), '{private-invalid-metadata')
+  assert.throws(() => codexRuntimeEnv(), /Invalid Codex authentication link metadata/)
+  assert.equal(JSON.parse(await readFile(personal, 'utf8')).tokens.account_id, 'personal-account')
+  await assert.rejects(readFile(join(destination, 'auth.json')), { code: 'ENOENT' })
+})
+
+test('a changed personal home cannot resurrect authentication from the previous home', async () => {
+  await writeAuth(source, 'old-account')
+  codexRuntimeEnv()
+  const nextHome = join(root, 'next-personal-home')
+  const env = { ...process.env, CODEX_HOME: nextHome }
+  codexRuntimeEnv(env)
+  assert.equal(codexAuthFingerprint(), null)
+  await writeAuth(nextHome, 'new-account')
+  codexRuntimeEnv(env)
+  assert.equal(JSON.parse(await readFile(join(destination, 'auth.json'), 'utf8')).tokens.account_id, 'new-account')
+})
+
 test('exec, triage, doctor and catalog share the isolated home in secure and compatibility modes', async () => {
+  await writeAuth(source, 'shared-account')
   const adapter = getAdapter('codex')
   for (const mode of ['0', '1']) {
     process.env.CUMORA_BYOA_ALLOW_UNSANDBOXED = mode
@@ -140,6 +226,7 @@ test('exec, triage, doctor and catalog share the isolated home in secure and com
   for (const call of spawns) {
     assert.equal(call.home, codexRuntimeHome())
     assert.equal(call.sqlite, codexRuntimeHome())
+    assert.equal(call.authAccount, 'shared-account')
     assert.ok(call.argv.includes('memories.generate_memories=false'))
     assert.ok(call.argv.includes('memories.use_memories=false'))
   }
@@ -239,6 +326,35 @@ test('persistent sessions resume the same thread after restart; wake probes are 
     assert.ok(call.argv.includes('memories.use_memories=false'))
     assert.ok(call.argv.includes('default_permissions="cumora"'))
   }
+})
+
+test('persistent sessions finish active turns and then resume with a changed or removed login', { skip: IS_WIN }, async () => {
+  const personal = await writeAuth(source, 'original-account')
+  const adapter = getAdapter('codex')
+  const env = { ...process.env, CUMORA_AGENT_IPC_DIR: join(root, 'ipc'), CUMORA_AGENT_MCP_SHIM: join(root, 'shim') }
+  const logs: string[] = []
+  const session = adapter.startSession!({ home: root, env, onLog: line => logs.push(line) })!
+  try {
+    assert.equal((await session.send('hello')).exitCode, 0)
+    const auth = await readFile(personal, 'utf8')
+    writeFileSync(personal, '{partial credential write')
+    assert.equal(session.alive, true)
+    writeFileSync(personal, auth)
+    const turn = session.send('finish this turn')
+    writeFileSync(personal, JSON.stringify({ tokens: { account_id: 'new-account' } }))
+    assert.equal(session.alive, true)
+    assert.equal((await turn).exitCode, 0)
+    assert.equal(session.alive, false)
+    assert.equal(session.sessionId, 'fixture-thread')
+  } finally { await session.stop() }
+  const resumed = adapter.startSession!({ home: root, env, resumeSessionId: session.sessionId, onLog: line => logs.push(line) })!
+  try {
+    assert.equal((await resumed.send('continue')).sessionId, 'fixture-thread')
+    await rm(personal)
+    assert.equal(resumed.alive, false)
+  } finally { await resumed.stop() }
+  assert.ok(logs.some(line => line.includes('login changed')))
+  assert.equal((await calls()).filter(call => call.argv?.includes('app-server'))[1].authAccount, 'new-account')
 })
 
 test('the login command uses the dedicated home and exits without pairing or starting a daemon', async () => {
