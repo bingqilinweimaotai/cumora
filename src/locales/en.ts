@@ -473,9 +473,14 @@ export const en = {
   'agent.providerMissing': 'Unavailable: {id}',
   'agent.modelLabelByoa': 'Big-brain model (大脑)',
   'agent.modelHintByoaCatalog': 'Choose a model available to this computer\'s engine, or search and enter a custom model id.',
+  'agent.modelCatalogGuessed': 'This engine reported no model list, so there is nothing to pick from. Cumora only has built-in guesses for it, and those may not be available to this account — type the model id instead.',
+  'agent.modelCatalogUnverified': 'This computer\'s daemon is too old to say which models its engine can actually run, so the list is hidden. Type the model id, or update the daemon on that computer and refresh.',
   'agent.fastHintByoaCatalog': 'Per-agent model for lightweight decisions such as inbox triage. Blank uses the engine\'s small-brain default.',
   'agent.followEngineDefault': 'Follow engine default',
   'agent.followSmallBrainDefault': 'Follow small-brain default',
+  // The catalog only reports this computer's CLI settings; a deployment pin
+  // may still win, so the hint names its source instead of promising the model.
+  'agent.modelLocalDefault': 'Local default: {model}',
   'agent.searchModels': 'Search models or enter a model id…',
   'agent.useCustomModel': 'Use custom model: {model}',
   'agent.recommended': 'Recommended',

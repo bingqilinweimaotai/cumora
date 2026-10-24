@@ -17,7 +17,7 @@ import { cn } from '@/lib/utils'
 import { api, getPairingServerOrigin, getServerOrigin, type ApiProject, type ApiQuotaSnapshot, type ApiQuotaWindow } from '@/api/client'
 import { ENGINE_BIN, ENGINE_LABEL, RUNNABLE_ENGINES, RUNNABLE_ENGINE_IDS, engineLabel, type RunnableEngineId } from '@/lib/engines'
 import type { Computer, EngineId, EngineModelCatalog } from '@/types'
-import { engineModelChoices } from '@/lib/engine-model-choices'
+import { engineModelChoices, catalogTrust } from '@/lib/engine-model-choices'
 import { ENGINE_UPDATE_TTL_SECONDS } from '../../shared/engine-update'
 
 // The tab's identity is its `key`; the label is a message key resolved at
@@ -1289,6 +1289,7 @@ function ComputersTab() {
                                           options={engineModelChoices(row.modelCatalog, 'big', {
                                             follow: t('me.engineModelNotSet'),
                                             recommended: t('agent.recommended'),
+                                            localDefault: (model) => t('agent.modelLocalDefault', { model }),
                                           })}
                                           searchPlaceholder={t('agent.searchModels')}
                                           allowCustom={row.modelCatalog?.supportsCustom !== false}
@@ -1308,6 +1309,7 @@ function ComputersTab() {
                                             options={engineModelChoices(row.modelCatalog, 'small', {
                                               follow: t('me.engineModelNotSet'),
                                               recommended: t('agent.recommended'),
+                                              localDefault: (model) => t('agent.modelLocalDefault', { model }),
                                             })}
                                             searchPlaceholder={t('agent.searchModels')}
                                             allowCustom={row.modelCatalog?.supportsCustom !== false}
@@ -1317,6 +1319,12 @@ function ComputersTab() {
                                       )}
                                     </fieldset>
                                     <p className="text-[11px] text-ink-500">{t('me.engineModelHelp')}</p>
+                                    {catalogTrust(row.modelCatalog) === 'guessed' && (
+                                      <p className="text-[11px] text-ink-500">{t('agent.modelCatalogGuessed')}</p>
+                                    )}
+                                    {catalogTrust(row.modelCatalog) === 'unverified' && (
+                                      <p className="text-[11px] text-ink-500">{t('agent.modelCatalogUnverified')}</p>
+                                    )}
                                     <div className="flex gap-2">
                                       <button
                                         type="button"
