@@ -1373,11 +1373,9 @@ export const zhCN: Partial<Record<keyof typeof en, string>> = {
   'me.engineModelConfig': '{engine} 的默认模型',
   'me.engineModelNotSet': '跟随引擎默认',
   'me.engineModelConfigure': '配置模型',
-  'me.engineDefaultModel': '主模型（留空使用默认设置）',
-  'me.engineFastModel': '快速模型（留空使用默认设置）',
-  'me.engineModelHelp': 'Agent 单独指定的模型优先；留空时，由本地引擎配置或服务端默认设置决定。',
-  'me.engineModelPlaceholder': '例如 claude-sonnet-4-20250514',
-  'me.engineFastModelPlaceholder': '例如 claude-haiku-4-20250514',
+  'me.engineDefaultModel': '主模型',
+  'me.engineFastModel': '快速模型',
+  'me.engineModelHelp': 'Agent 单独指定的模型优先；选择“跟随引擎默认”时，由本地引擎配置或服务端默认设置决定。',
 
   // ─── 自动更新对话框 + 横幅 ────────────────────────────────────────
   'updater.bannerUpdateReady': '更新就绪',
