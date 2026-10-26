@@ -12,7 +12,7 @@ import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/pr
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, test } from 'node:test'
-import { getAdapter, resolveOmpBin, type EngineHopReport } from '../agents/computer/engine.js'
+import { getAdapter, resolveOmpBin, type EngineHopReport, type EngineSessionArgs } from '../agents/computer/engine.js'
 
 const tempDirs: string[] = []
 const liveSessions: Array<{ stop(): void | Promise<void> }> = []
@@ -281,6 +281,20 @@ async function makeFixture(mode = 'ok'): Promise<Fixture> {
   }
 }
 
+function startOmpSession(f: Fixture, overrides: Partial<Omit<EngineSessionArgs, 'home' | 'env'>> = {}) {
+  const session = getAdapter('omp').startSession?.({
+    home: f.home,
+    env: f.env,
+    standingPrompt: null,
+    resumeSessionId: null,
+    onLog: () => {},
+    ...overrides,
+  })
+  assert.ok(session)
+  liveSessions.push(session)
+  return session
+}
+
 afterEach(async () => {
   for (const s of liveSessions.splice(0)) {
     try { await s.stop() } catch { /* already gone */ }
@@ -293,15 +307,7 @@ test('omp wake spawns `omp acp` and triage spawns `omp acp --no-tools --no-sessi
   const adapter = getAdapter('omp')
   const signal = AbortSignal.timeout(10_000)
 
-  const session = adapter.startSession?.({
-    home: f.home,
-    env: f.env,
-    standingPrompt: null,
-    resumeSessionId: null,
-    onLog: () => {},
-  })
-  assert.ok(session)
-  liveSessions.push(session)
+  const session = startOmpSession(f)
   await session.send('wake turn')
   await session.stop()
 
@@ -318,17 +324,12 @@ test('omp orders initialize → session/new → pin → prompt and pins once acr
   const f = await makeFixture()
   const logs: string[] = []
   const hops: EngineHopReport[] = []
-  const session = getAdapter('omp').startSession?.({
-    home: f.home,
-    env: f.env,
+  const session = startOmpSession(f, {
     model: 'magpie/auto/dfmodel',
     standingPrompt: 'ignored by omp over ACP',
-    resumeSessionId: null,
     onLog: (l) => logs.push(l),
     onHopUsage: (h) => hops.push(h),
   })
-  assert.ok(session)
-  liveSessions.push(session)
   assert.equal(session.carriesStandingPrompt, false, 'omp does not deliver --append-system-prompt over ACP')
 
   const r1 = await session.send('first wake')
@@ -365,21 +366,16 @@ test('omp orders initialize → session/new → pin → prompt and pins once acr
 test('omp keeps the turn alive when the model pin is rejected and never retries it', async () => {
   const f = await makeFixture('reject-pin')
   const logs: string[] = []
-  const session = getAdapter('omp').startSession?.({
-    home: f.home,
-    env: f.env,
+  const session = startOmpSession(f, {
     model: 'unknown/selector',
-    standingPrompt: null,
-    resumeSessionId: null,
     onLog: (l) => logs.push(l),
   })
-  assert.ok(session)
-  liveSessions.push(session)
 
   const r1 = await session.send('first wake')
   const r2 = await session.send('second wake')
 
   assert.equal(r1.exitCode, 0, 'an unknown pin is a preference loss, not a turn failure')
+  assert.equal(r1.model, '<omp-default>', 'a rejected pin must not be reported as the active model')
   assert.equal(r2.exitCode, 0)
   assert.ok(logs.some((l) => l.includes('[omp] model pin (unknown/selector) rejected') && l.includes('engine default')))
   const pins = (await f.readCalls()).filter((c) => c.method === 'session/set_config_option')
@@ -389,16 +385,11 @@ test('omp keeps the turn alive when the model pin is rejected and never retries 
 test('omp attaches with session/load so the transcript replays, and replay stays out of the turn', async () => {
   const f = await makeFixture('replay-on-load')
   const logs: string[] = []
-  const session = getAdapter('omp').startSession?.({
-    home: f.home,
-    env: f.env,
+  const session = startOmpSession(f, {
     model: 'deepseek/deepseek-v4-pro',
-    standingPrompt: null,
     resumeSessionId: 'omp-sess-existing',
     onLog: (l) => logs.push(l),
   })
-  assert.ok(session)
-  liveSessions.push(session)
 
   const r = await session.send('wake after load')
   assert.equal(r.exitCode, 0)
@@ -417,15 +408,9 @@ test('omp attaches with session/load so the transcript replays, and replay stays
 test('omp classifies both missing-session wordings as resume-not-found, ungated on wasResume', async () => {
   // `ACP session not found` — the attach wording, surfaced from data.details.
   const gone = await makeFixture('session-gone')
-  const onGone = getAdapter('omp').startSession?.({
-    home: gone.home,
-    env: gone.env,
-    standingPrompt: null,
+  const onGone = startOmpSession(gone, {
     resumeSessionId: 'omp-sess-stale',
-    onLog: () => {},
   })
-  assert.ok(onGone)
-  liveSessions.push(onGone)
   const rGone = await onGone.send('turn on a dead session')
   assert.equal(rGone.exitCode, 1)
   assert.equal(rGone.failure?.kind, 'resume-not-found')
@@ -433,29 +418,17 @@ test('omp classifies both missing-session wordings as resume-not-found, ungated 
 
   // `Unsupported ACP session` — the live-call wording.
   const unsupported = await makeFixture('session-unsupported')
-  const onUnsupported = getAdapter('omp').startSession?.({
-    home: unsupported.home,
-    env: unsupported.env,
-    standingPrompt: null,
+  const onUnsupported = startOmpSession(unsupported, {
     resumeSessionId: 'omp-sess-stale',
-    onLog: () => {},
   })
-  assert.ok(onUnsupported)
-  liveSessions.push(onUnsupported)
   const rUnsupported = await onUnsupported.send('turn on an unsupported session')
   assert.equal(rUnsupported.failure?.kind, 'resume-not-found')
 
   // A session that disappears AFTER a successful turn still recovers.
   const afterFirst = await makeFixture('session-gone-after-first')
-  const onAfterFirst = getAdapter('omp').startSession?.({
-    home: afterFirst.home,
-    env: afterFirst.env,
-    standingPrompt: null,
+  const onAfterFirst = startOmpSession(afterFirst, {
     resumeSessionId: 'omp-sess-existing',
-    onLog: () => {},
   })
-  assert.ok(onAfterFirst)
-  liveSessions.push(onAfterFirst)
   assert.equal((await onAfterFirst.send('first turn')).exitCode, 0)
   assert.equal((await onAfterFirst.send('second turn')).failure?.kind, 'resume-not-found')
 })
@@ -463,15 +436,10 @@ test('omp classifies both missing-session wordings as resume-not-found, ungated 
 test('omp self-heals a stale session/load at handshake time via session/new', async () => {
   const f = await makeFixture('fail-load')
   const logs: string[] = []
-  const session = getAdapter('omp').startSession?.({
-    home: f.home,
-    env: f.env,
-    standingPrompt: null,
+  const session = startOmpSession(f, {
     resumeSessionId: 'omp-sess-stale',
     onLog: (l) => logs.push(l),
   })
-  assert.ok(session)
-  liveSessions.push(session)
 
   const r = await session.send('after stale load')
   assert.equal(r.exitCode, 0)
@@ -490,15 +458,7 @@ test('omp auto-answers session/request_permission preferring allow_always, then 
   ]
   for (const [mode, expected] of cases) {
     const f = await makeFixture(mode)
-    const session = getAdapter('omp').startSession?.({
-      home: f.home,
-      env: f.env,
-      standingPrompt: null,
-      resumeSessionId: null,
-      onLog: () => {},
-    })
-    assert.ok(session)
-    liveSessions.push(session)
+    const session = startOmpSession(f)
 
     const r = await session.send('do something requiring permission')
     assert.equal(r.exitCode, 0, mode)
@@ -515,16 +475,9 @@ test('omp auto-answers session/request_permission preferring allow_always, then 
 test('omp treats stopReason=cancelled as a failed turn instead of success', async () => {
   const f = await makeFixture('cancelled')
   const hops: EngineHopReport[] = []
-  const session = getAdapter('omp').startSession?.({
-    home: f.home,
-    env: f.env,
-    standingPrompt: null,
-    resumeSessionId: null,
-    onLog: () => {},
+  const session = startOmpSession(f, {
     onHopUsage: (h) => hops.push(h),
   })
-  assert.ok(session)
-  liveSessions.push(session)
 
   const r = await session.send('fail with cancelled stopReason')
   assert.equal(r.exitCode, 1)
@@ -534,15 +487,9 @@ test('omp treats stopReason=cancelled as a failed turn instead of success', asyn
 
 test('omp steer injects mid-turn via _session/steering and no-ops while idle', async () => {
   const f = await makeFixture('hold')
-  const session = getAdapter('omp').startSession?.({
-    home: f.home,
-    env: f.env,
-    standingPrompt: null,
-    resumeSessionId: null,
+  const session = startOmpSession(f, {
     onLog: f.log,
   })
-  assert.ok(session)
-  liveSessions.push(session)
 
   // Before any turn: nothing to inject into, and no RPC may be attempted.
   session.steer('too early')
@@ -564,15 +511,9 @@ test('omp steer injects mid-turn via _session/steering and no-ops while idle', a
 
 test('omp swallows a rejected steer and logs it once', async () => {
   const f = await makeFixture('reject-steer')
-  const session = getAdapter('omp').startSession?.({
-    home: f.home,
-    env: f.env,
-    standingPrompt: null,
-    resumeSessionId: null,
+  const session = startOmpSession(f, {
     onLog: f.log,
   })
-  assert.ok(session)
-  liveSessions.push(session)
 
   const held = session.send('held turn')
   await f.waitForLog('PROMPT_HELD')
@@ -587,15 +528,7 @@ test('omp swallows a rejected steer and logs it once', async () => {
 
 test('omp process dying MID-TURN resolves the turn as a failure, never rejects', async () => {
   const f = await makeFixture('die-mid-turn')
-  const session = getAdapter('omp').startSession?.({
-    home: f.home,
-    env: f.env,
-    standingPrompt: null,
-    resumeSessionId: null,
-    onLog: () => {},
-  })
-  assert.ok(session)
-  liveSessions.push(session)
+  const session = startOmpSession(f)
 
   const r = await session.send('crash now')
   assert.equal(r.exitCode, 17)
@@ -674,16 +607,9 @@ test('omp resolves no bin when only another engine is on PATH and reports a fail
 test('omp extracts the ACP camelCase usage fields', async () => {
   const f = await makeFixture('with-usage')
   const hops: EngineHopReport[] = []
-  const session = getAdapter('omp').startSession?.({
-    home: f.home,
-    env: f.env,
-    standingPrompt: null,
-    resumeSessionId: null,
-    onLog: () => {},
+  const session = startOmpSession(f, {
     onHopUsage: (h) => hops.push(h),
   })
-  assert.ok(session)
-  liveSessions.push(session)
 
   const r = await session.send('turn with usage')
   assert.equal(r.exitCode, 0)

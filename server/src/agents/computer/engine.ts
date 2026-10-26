@@ -322,10 +322,10 @@ const CODEX_LOG_RAW = process.env.CUMORA_CODEX_VERBOSE === '1'
  *  `shell:true` when nothing else is on PATH. */
 // Exported for tests; the nvm-windows extensionless-shim regression (issue #5)
 // needs a stable handle to the resolver without going through spawn().
-export function resolveSpawn(bin: string): { command: string; shell: boolean; wantsStdinPrompt: boolean } {
+export function resolveSpawn(bin: string, env: NodeJS.ProcessEnv = process.env): { command: string; shell: boolean; wantsStdinPrompt: boolean } {
   if (!IS_WIN) return { command: bin, shell: false, wantsStdinPrompt: false }
-  const exts = (process.env.PATHEXT ?? '.COM;.EXE;.BAT;.CMD').split(';').map((e) => e.trim()).filter(Boolean)
-  for (const dir of (process.env.PATH ?? '').split(PATH_DELIMITER)) {
+  const exts = (env.PATHEXT ?? '.COM;.EXE;.BAT;.CMD').split(';').map((e) => e.trim()).filter(Boolean)
+  for (const dir of (env.PATH ?? '').split(PATH_DELIMITER)) {
     if (!dir) continue
     for (const ext of exts) {
       const candidate = join(dir, bin + ext)
@@ -342,7 +342,7 @@ export function resolveSpawn(bin: string): { command: string; shell: boolean; wa
   // itself is a `#!/bin/sh` wrapper and cannot be exec'd without a shell → force
   // shell:true so Node routes the call through cmd.exe, which can find the
   // .cmd via PATHEXT after the shim.
-  for (const dir of (process.env.PATH ?? '').split(PATH_DELIMITER)) {
+  for (const dir of (env.PATH ?? '').split(PATH_DELIMITER)) {
     if (!dir) continue
     const shim = join(dir, bin)
     if (existsSync(shim)) {
@@ -3511,7 +3511,7 @@ function resolveMakaAcpSpawn(env: NodeJS.ProcessEnv): { command: string; args: s
   const explicit = env.CUMORA_MAKA_BIN?.trim()
   if (explicit) {
     if (/\.[cm]?js$/i.test(explicit)) return { command: process.execPath, args: [explicit, '--acp'], shell: false }
-    const sp = resolveSpawn(explicit)
+    const sp = resolveSpawn(explicit, env)
     return { command: sp.command, args: ['--acp'], shell: sp.shell }
   }
   const sp = resolveSpawn(resolveMakaBin(env) ?? 'maka')
@@ -3842,10 +3842,10 @@ function resolveOmpAcpSpawn(env: NodeJS.ProcessEnv, extraArgs: string[]): { comm
   const explicit = env.CUMORA_OMP_BIN?.trim()
   if (explicit) {
     if (/\.[cm]?js$/i.test(explicit)) return { command: process.execPath, args: [explicit, 'acp', ...extraArgs], shell: false }
-    const sp = resolveSpawn(explicit)
+    const sp = resolveSpawn(explicit, env)
     return { command: sp.command, args: ['acp', ...extraArgs], shell: sp.shell }
   }
-  const sp = resolveSpawn(resolveOmpBin(env) ?? 'omp')
+  const sp = resolveSpawn(resolveOmpBin(env) ?? 'omp', env)
   return { command: sp.command, args: ['acp', ...extraArgs], shell: sp.shell }
 }
 
@@ -3883,6 +3883,7 @@ class OmpSession implements EngineSession {
   private readonly onAgentText?: (text: string) => void
   private readonly model: string | null
   private modelPinTried = false
+  private modelPinAccepted = false
   private turn: { resolve: (r: EngineRunResult) => void } | null = null
   private promptInFlight = false
   private steerWarned = false
@@ -3942,7 +3943,7 @@ class OmpSession implements EngineSession {
         return done
       }
       const usage = extractAcpUsage(resp.result) ?? undefined
-      const model = this.model ?? '<omp-default>'
+      const model = this.model && this.modelPinAccepted ? this.model : '<omp-default>'
       if (this.onHopUsage) {
         try {
           this.onHopUsage({
@@ -3996,6 +3997,7 @@ class OmpSession implements EngineSession {
     this.modelPinTried = true
     try {
       await this.conn.rpc('session/set_config_option', { sessionId: this.conn.sid, configId: 'model', value: this.model })
+      this.modelPinAccepted = true
     } catch (err) {
       const why = err instanceof Error ? err.message : String(err)
       this.log(`[omp] model pin (${this.model}) rejected (${why}) — continuing on the engine default`)
