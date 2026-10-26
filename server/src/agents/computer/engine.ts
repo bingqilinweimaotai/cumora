@@ -1709,7 +1709,7 @@ class ClaudeAdapter implements EngineAdapter {
     const base = flags.length
       ? [...flags, '-p']
       : allowUnsandboxedByoa(env)
-        ? ['-p', ...model, '--output-format', 'json', '--dangerously-skip-permissions', '--strict-mcp-config']
+        ? ['-p', ...model, '--output-format', 'json', '--tools', '', '--strict-mcp-config']
         : ['-p', ...model, '--output-format', 'json', '--restricted', '--tools', '', '--strict-mcp-config']
     const argv = wantsStdinPrompt ? base : (flags.length ? [...base, args.prompt] : ['-p', args.prompt, ...base.slice(1)])
     const res = await spawnCapture(command, argv, {
@@ -1742,7 +1742,7 @@ class ClaudeAdapter implements EngineAdapter {
     const model = args.tier === 'small' ? claudeFastModelArgs(env) : main ? ['--model', main] : []
     const { command, shell, wantsStdinPrompt } = resolveSpawn(this.bin)
     const base = allowUnsandboxedByoa(env)
-      ? ['-p', ...model, '--output-format', 'text', '--dangerously-skip-permissions', '--strict-mcp-config']
+      ? ['-p', ...model, '--output-format', 'text', '--tools', '', '--strict-mcp-config']
       : ['-p', ...model, '--output-format', 'text', '--restricted', '--tools', '', '--strict-mcp-config']
     const argv = wantsStdinPrompt ? base : ['-p', DOCTOR_PROMPT, ...base.slice(1)]
     return spawnCapture(command, argv, {
@@ -1776,7 +1776,7 @@ class ClaudeAdapter implements EngineAdapter {
     const main = claudeMainModel(env)
     const model = main ? ['--model', main] : []
     const base = allowUnsandboxedByoa(env)
-      ? ['-p', ...model, '--output-format', 'text', '--append-system-prompt-file', promptFile, '--dangerously-skip-permissions']
+      ? ['-p', ...model, '--output-format', 'text', '--append-system-prompt-file', promptFile, '--tools', '', '--strict-mcp-config']
       : [
           '-p', ...model, '--output-format', 'text', '--append-system-prompt-file', promptFile,
           '--restricted', '--tools', '', '--strict-mcp-config',
@@ -3513,6 +3513,7 @@ interface MakaTurnOptions {
   prompt: string
   model?: string | null
   resumeSessionId?: string | null
+  permissionMode?: 'ask' | 'bypass'
   signal: AbortSignal
   onLog?: (line: string) => void
   onHopUsage?: (r: EngineHopReport) => void
@@ -3521,6 +3522,7 @@ interface MakaTurnOptions {
 interface MakaSessionOptions extends EngineSessionArgs {
   onAgentText?: (text: string) => void
   signal?: AbortSignal
+  permissionMode?: 'ask' | 'bypass'
 }
 
 const MAKA_MISSING_SESSION_RE =
@@ -3534,6 +3536,7 @@ class MakaSession implements EngineSession {
   private readonly onHopUsage?: (r: EngineHopReport) => void
   private readonly onAgentText?: (text: string) => void
   private readonly model: string | null
+  private readonly permissionMode: 'ask' | 'bypass'
   private permissionModeUnapplied = true
   private modelWarned = false
   private turn: { resolve: (r: EngineRunResult) => void } | null = null
@@ -3546,6 +3549,7 @@ class MakaSession implements EngineSession {
     this.onHopUsage = opts.onHopUsage
     this.onAgentText = opts.onAgentText
     this.model = opts.model ?? null
+    this.permissionMode = opts.permissionMode ?? 'bypass'
     this.conn = new AcpRpcConnection(
       resolveMakaAcpSpawn(env),
       home,
@@ -3640,11 +3644,14 @@ class MakaSession implements EngineSession {
         await this.conn.rpc('session/set_config_option', {
           sessionId: this.conn.sid,
           configId: 'permission_mode',
-          value: 'bypass',
+          value: this.permissionMode,
         })
         this.permissionModeUnapplied = false
       } catch (err) {
         const why = err instanceof Error ? err.message : String(err)
+        if (this.permissionMode === 'ask') {
+          throw new Error(`maka permission_mode=ask could not be applied: ${why}`)
+        }
         this.log(`[maka] permission_mode pin rejected (${why}) — continuing`)
       }
     }
@@ -3677,6 +3684,10 @@ class MakaSession implements EngineSession {
 
   private onUpdate(msg: AcpMsg): void {
     if (msg.method === 'session/request_permission' && msg.id !== undefined) {
+      if (this.permissionMode === 'ask') {
+        this.conn.reply(msg.id, { outcome: { outcome: 'cancelled' } })
+        return
+      }
       const options = Array.isArray(msg.params?.options)
         ? msg.params.options as Array<{ optionId?: unknown; kind?: unknown }>
         : []
@@ -3718,6 +3729,7 @@ async function runMakaAcpTurn(opts: MakaTurnOptions): Promise<EngineRunResult & 
     onHopUsage: opts.onHopUsage,
     onAgentText: (text) => chunks.push(text),
     signal: opts.signal,
+    permissionMode: opts.permissionMode,
   })
   try {
     return { ...await session.send(opts.prompt), text: chunks.join('') }
@@ -3764,6 +3776,7 @@ class MakaAdapter implements EngineAdapter {
       model: args.model,
       signal: args.signal,
       onLog: args.onLog,
+      permissionMode: 'ask',
     })
   }
 
@@ -3773,6 +3786,7 @@ class MakaAdapter implements EngineAdapter {
       env: args.env,
       prompt: DOCTOR_PROMPT,
       signal: args.signal,
+      permissionMode: 'ask',
     })
   }
 
@@ -5497,6 +5511,7 @@ class GeminiAdapter implements EngineAdapter {
     const model = ['--model', args.model || triageModel('gemini-2.5-flash-lite')]
     const settings = join(args.cwd, GEMINI_TRIAGE_SETTINGS_FILE)
     let env = geminiEnv(args.env)
+    let staged: string | null = null
     try {
       // Write-then-rename, not writeFile onto the live path. The triage cwd is
       // shared — the doctor hands the SAME dir to every engine's probe, and
@@ -5504,16 +5519,20 @@ class GeminiAdapter implements EngineAdapter {
       // it writes, so a second caller can be mid-truncate while gemini is
       // reading. Identical content does not save us from a zero-length read;
       // rename is atomic, so a reader sees one whole file or the other.
-      const staged = `${settings}.${process.pid}.${randomUUID().slice(0, 8)}`
+      staged = `${settings}.${process.pid}.${randomUUID().slice(0, 8)}`
       await writeFile(staged, GEMINI_TRIAGE_SETTINGS, 'utf8')
       await rename(staged, settings)
       // System scope so it wins over any user/workspace settings the operator
       // has; it MERGES with them, so their auth config is untouched.
       env = { ...env, GEMINI_CLI_SYSTEM_SETTINGS_PATH: settings }
-    } catch {
-      // Triage still works with tools present — the cwd is neutral and the
-      // prompt asks for a direct answer. Losing the guarantee is not worth
-      // losing the classification.
+    } catch (err) {
+      if (staged) await rm(staged, { force: true }).catch(() => {})
+      return {
+        exitCode: 1,
+        error: `could not install Gemini triage settings: ${err instanceof Error ? err.message : String(err)}`,
+        sessionId: null,
+        text: '',
+      }
     }
     return spawnGeminiStream(
       command,
@@ -5696,11 +5715,9 @@ class QwenAdapter implements EngineAdapter {
       command,
       // `--safe-mode` is qwen's own switch for "ignore every customization":
       // context files, hooks, extensions, skills and MCP servers all stay
-      // unloaded, which is the same thing --strict-mcp-config buys the Claude
-      // triage path and keeps a cold triage spawn cheap. It deliberately does
-      // NOT disable auth, and `-y` (an argv flag) still wins over it, so
-      // nothing can stall waiting for an approval nobody is there to give.
-      [...QwenAdapter.STREAM, '--safe-mode', '--yolo', ...model],
+      // unloaded, which keeps a cold triage spawn cheap. Plan mode removes
+      // automatic approval for tool use without changing authentication.
+      [...QwenAdapter.STREAM, '--safe-mode', '--approval-mode', 'plan', ...model],
       {
         cwd: args.cwd,
         env: args.env,
