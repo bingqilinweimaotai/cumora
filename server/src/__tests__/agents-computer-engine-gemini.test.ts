@@ -335,7 +335,7 @@ test('triage fails closed when its tool-free settings cannot be installed', { sk
   })
   assert.notEqual(res.error, undefined)
   assert.match(res.error ?? '', /could not install Gemini triage settings/)
-  assert.equal(await fakeLog(f), [])
+  assert.deepEqual(await fakeLog(f), [])
   assert.deepEqual(
     (await readdir(f.home)).filter((name) => name.startsWith('.cumora-gemini-triage.')),
     [],
