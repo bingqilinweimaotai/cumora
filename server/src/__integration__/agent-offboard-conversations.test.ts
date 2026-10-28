@@ -1,11 +1,8 @@
 /**
  * Off-boarding an agent must also take it out of every conversation.
  *
- * The endpoint promises the agent "disappears from active conversations", and
- * the roster UI hides departed rows. Membership, though, lives in its own
- * normalized table, so the participant update alone leaves the agent seated in
- * every group: it keeps a slot in the member hive, the count stays high, and
- * the direct chat keeps rendering its name.
+ * Membership lives in its own normalized table, not on the participant row, so
+ * a participant update alone leaves every group roster untouched.
  */
 import { test, before, beforeEach, after } from 'node:test'
 import assert from 'node:assert/strict'
