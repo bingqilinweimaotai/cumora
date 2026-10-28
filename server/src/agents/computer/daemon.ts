@@ -57,6 +57,7 @@ import { CODEX_LOGIN_COMMAND, CODEX_MIGRATE_COMMAND, CODEX_SESSION_SCOPE, codexR
 import { cachedCodexProvider } from './codex-provider.js'
 import { migrateCodexSession, migrateCodexSessions } from './codex-session-migration.js'
 import { runWithSessionRecovery } from './session-recovery.js'
+import { LocalCollaboration } from './local-collaboration.js'
 import { normalizeAttachments, type AttachmentDescriptor } from '../../../../shared/attachments.js'
 import { AgentAttachmentCache, attachmentImageGuidance, isImageAttachment, renderCachedAttachments, type AttachmentCacheResult } from './attachment-cache.js'
 
@@ -2351,6 +2352,10 @@ export class AgentRunner {
    *  only argv strings; identity, URL, Authorization, redirects, and token
    *  refresh remain daemon-owned and cannot be changed by the model. */
   private async invokeRuntimeCli(argv: string[], lifecycleSignal: AbortSignal): Promise<RuntimeCliBrokerResult> {
+    if (argv[0] === 'agent' && argv[1] === 'computer' && argv[2] === 'local') {
+      const result = await new LocalCollaboration({ homeRoot: AGENTS_ROOT }).run(argv.slice(3), { agentId: this.agent.id })
+      return { text: result.text, exitCode: result.exitCode }
+    }
     const requestAbort = new AbortController()
     const timeout = setTimeout(() => requestAbort.abort(), HTTP_TIMEOUT_MS)
     const onLifecycleAbort = () => requestAbort.abort()
@@ -2912,6 +2917,22 @@ export class AgentRunner {
       `Write project decisions/materials under \`memory/projects/<id>/\` (and a pointer in that folder's MEMORY.md); ` +
       `write identity-level facts under \`memory/\`. Pinning a memory makes it global. ` +
       `Saying "got it" does NOT persist. Chat history can be wiped by compaction; memory files remain.\n\n` +
+      `Local code collaboration (same Computer only): an operator must first grant a repository from ` +
+      `their Computer terminal with \`cumora agent computer local projects grant <absolute-path>\`. ` +
+      `Then use \`cumora agent computer local worktree create <project-id> <task-id>\` to get your own ` +
+      `worktree. Work only inside that worktree. Inspect it with ` +
+      `\`cumora agent computer local worktree status <worktree-id>\` and read changes with ` +
+      `\`cumora agent computer local worktree diff <worktree-id>\`. ` +
+      `Commit with \`cumora agent computer local worktree commit <worktree-id> --expected-head ` +
+      `<full-head-from-status> --message <text>\`. If the head changed, run status again and retry ` +
+      `from the new head. After status is clean, propose the committed change with ` +
+      `\`cumora agent computer local handoff propose <worktree-id> <target-agent-id>\`. ` +
+      `The receiver checks \`cumora agent computer local handoff list\`, reviews ` +
+      `\`cumora agent computer local handoff show <handoff-id> --diff\`, and accepts with ` +
+      `\`cumora agent computer local handoff accept <handoff-id>\` to receive the fixed commit in ` +
+      `their own local worktree. ` +
+      `These commands read and write the local Computer only: never upload repository paths, files, Git objects, ` +
+      `commits, diffs, or worktree contents to Cumora.\n\n` +
       `Drive what you own forward — see a task through. Multi-step turns are fine; you do NOT have to ` +
       `fragment. If someone DMs you mid-task, answer briefly then keep going. The only thing to avoid ` +
       `is a pointless loop. If progress is waiting on a quiet teammate, follow up (short @<their-id> ` +
@@ -5001,6 +5022,12 @@ async function runDoctor(providerId?: string): Promise<void> {
 // ─── entry ──────────────────────────────────────────────────────────────
 
 export async function runComputerDaemon(argv: string[]): Promise<void> {
+  if (argv[0] === 'local') {
+    const result = await new LocalCollaboration({ homeRoot: AGENTS_ROOT }).run(argv.slice(1))
+    process.stdout.write(`${result.text}\n`)
+    process.exitCode = result.exitCode
+    return
+  }
   const args = parseArgs(argv)
   if (args.provider !== undefined && !args.doctor) throw new Error('--provider requires --doctor')
   const serverUrl = (args.server || DEFAULT_SERVER).replace(/\/+$/, '')
