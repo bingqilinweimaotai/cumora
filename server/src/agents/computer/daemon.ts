@@ -497,7 +497,6 @@ export function attachmentNotes(value: unknown): string {
     kind: attachment.kind,
     mime: attachment.mime,
     size: attachment.size,
-    url: attachment.url,
   })).join('')
 }
 
